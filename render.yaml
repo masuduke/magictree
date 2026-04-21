@@ -1,0 +1,92 @@
+services:
+  - type: worker
+    name: trading-bot
+    env: python
+    region: frankfurt
+    plan: starter
+
+    buildCommand: |
+      apt-get update && apt-get install -y ffmpeg fonts-dejavu-core
+      pip install --upgrade pip
+      pip install -r requirements.txt
+
+    startCommand: python main.py
+
+    disk:
+      name: bot-data
+      mountPath: /opt/render/project/src
+      sizeGB: 1
+
+    envVars:
+      # ── Required ─────────────────────────────────────────────────────────────
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+      # ── eToro (main broker — ALL asset types) ─────────────────────────────────
+      - key: ETORO_API_KEY
+        sync: false
+      # Get from: eToro → Settings → API Keys → Create Agent Portfolio key
+
+      # ── Trading settings ──────────────────────────────────────────────────────
+      - key: PAPER_TRADE
+        value: "true"           # KEEP TRUE until you've watched 2 weeks of signals
+
+      - key: INITIAL_CAPITAL
+        value: "500"
+
+      - key: RISK_PER_TRADE_PCT
+        value: "0.02"           # 2% risk per trade = £10 max loss per trade
+
+      - key: TAKE_PROFIT_PCT
+        value: "0.01"           # 1% take profit
+
+      - key: STOP_LOSS_PCT
+        value: "0.01"           # 1% stop loss
+
+      - key: MAX_TRADES_PER_DAY
+        value: "3"              # max 3 trades across all asset classes per day
+
+      # ── Telegram ──────────────────────────────────────────────────────────────
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+
+      # ── Instagram ─────────────────────────────────────────────────────────────
+      - key: INSTAGRAM_ACCESS_TOKEN
+        sync: false
+
+      - key: INSTAGRAM_ACCOUNT_ID
+        sync: false
+
+      # ── YouTube ───────────────────────────────────────────────────────────────
+      - key: YOUTUBE_CLIENT_ID
+        sync: false
+
+      - key: YOUTUBE_CLIENT_SECRET
+        sync: false
+
+      - key: YOUTUBE_REFRESH_TOKEN
+        sync: false
+
+      # ── TikTok ────────────────────────────────────────────────────────────────
+      - key: TIKTOK_ACCESS_TOKEN
+        sync: false
+
+      # ── Cloudinary ────────────────────────────────────────────────────────────
+      - key: CLOUDINARY_URL
+        sync: false
+
+      # ── Branding ──────────────────────────────────────────────────────────────
+      - key: CHANNEL_NAME
+        value: "£500 Trading Challenge"
+
+      - key: CHANNEL_HANDLE
+        value: "@TradingFromZero"
+
+      - key: DAILY_POST_HOUR
+        value: "20"
+
+      - key: SCAN_INTERVAL_MINUTES
+        value: "15"
