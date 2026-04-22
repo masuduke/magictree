@@ -1,4 +1,4 @@
-"""
+﻿"""
 etoro_executor.py
 ------------------
 Executes trades on eToro via their official API.
@@ -71,8 +71,8 @@ def open_trade(signal: dict, capital: float, cfg) -> dict:
     tp      = signal['take_profit']
     sl      = signal['stop_loss']
     pos_sz  = _position_size(capital, cfg.RISK_PER_TRADE_PCT, entry, sl)
-    risk_£  = round(capital * cfg.RISK_PER_TRADE_PCT, 2)
-    amount  = risk_£ * 10   # invest 10x risk amount (uses 1:10 leverage concept)
+    risk_gbp  = round(capital * cfg.RISK_PER_TRADE_PCT, 2)
+    amount  = risk_gbp * 10   # invest 10x risk amount (uses 1:10 leverage concept)
 
     trade = {
         'id':              datetime.utcnow().strftime('%Y%m%d%H%M%S'),
@@ -83,8 +83,8 @@ def open_trade(signal: dict, capital: float, cfg) -> dict:
         'take_profit':     tp,
         'stop_loss':       sl,
         'position_size':   pos_sz,
-        'risk_amount':     risk_£,
-        'potential_profit': risk_£,
+        'risk_amount':     risk_gbp,
+        'potential_profit': risk_gbp,
         'confidence':      signal['confidence'],
         'entry_time':      signal['timestamp'],
         'status':          'OPEN',
@@ -101,7 +101,7 @@ def open_trade(signal: dict, capital: float, cfg) -> dict:
     if cfg.PAPER_TRADE:
         trade['order_id'] = f"PAPER_{trade['id']}"
         logger.info(f"📝 [PAPER] {signal['direction']} {signal['asset']} @ {entry} "
-                    f"| TP:{tp} SL:{sl} | Risk:£{risk_£}")
+                    f"| TP:{tp} SL:{sl} | Risk:£{risk_gbp}")
         return trade
 
     # ── Real eToro order ───────────────────────────────────────────────────────
