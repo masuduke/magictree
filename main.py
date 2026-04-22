@@ -1,4 +1,4 @@
-"""
+﻿"""
 main.py
 -------
 THE BRAIN OF THE TRADING BOT.
@@ -148,14 +148,14 @@ def main():
     logger.info(f"   Capital:         £{cfg.INITIAL_CAPITAL}")
     logger.info(f"   Scan interval:   {cfg.SCAN_INTERVAL_MINUTES} min")
     logger.info(f"   Daily post hour: {cfg.DAILY_POST_HOUR}:00 UTC")
-    logger.info(f"   Assets:          {cfg.CRYPTO_ASSETS + cfg.COMMODITY_ASSETS}")
+    logger.info(f"   Assets:          {cfg.CRYPTO_ASSETS + list(cfg.COMMODITY_ASSETS.keys())}")
 
     # Send startup notification
     notifier.send(
         f"🚀 *Bot Started*\n"
         f"Mode: {'Paper' if cfg.PAPER_TRADE else 'LIVE'}\n"
         f"Capital: £{cfg.INITIAL_CAPITAL}\n"
-        f"Assets: {', '.join(cfg.CRYPTO_ASSETS + cfg.COMMODITY_ASSETS)}",
+        f"Assets: {', '.join(cfg.CRYPTO_ASSETS + list(cfg.COMMODITY_ASSETS.keys()))}",
         cfg
     )
 
