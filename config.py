@@ -35,8 +35,8 @@ STOCK_ASSETS = {
 # All executable on eToro
 COMMODITY_ASSETS = {
     'GC=F': 'GOLD',
-    'SI=F': 'SILVER',
-    'CL=F': 'OIL',
+    #'SI=F': 'SILVER',  # Blocked - too volatile
+    #'CL=F': 'OIL',  # Blocked - Middle East war
 }
 
 # ─────────────────────────────────────────
