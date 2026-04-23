@@ -1,4 +1,4 @@
-"""
+﻿"""
 config.py  —  All settings. Edit via Render environment variables.
 """
 import os
@@ -8,10 +8,10 @@ import os
 # ─────────────────────────────────────────
 PAPER_TRADE        = os.getenv('PAPER_TRADE', 'true').lower() == 'true'
 INITIAL_CAPITAL    = float(os.getenv('INITIAL_CAPITAL', '500'))
-RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '0.02'))   # 2% risk
-TAKE_PROFIT_PCT    = float(os.getenv('TAKE_PROFIT_PCT',   '0.01'))   # 1% TP
+RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '0.01'))   # 2% risk
+TAKE_PROFIT_PCT    = float(os.getenv('TAKE_PROFIT_PCT', '0.02'))   # 1% TP
 STOP_LOSS_PCT      = float(os.getenv('STOP_LOSS_PCT',     '0.01'))   # 1% SL
-MAX_TRADES_PER_DAY = int(os.getenv('MAX_TRADES_PER_DAY',   '3'))
+MAX_TRADES_PER_DAY = int(os.getenv('MAX_TRADES_PER_DAY', '2'))
 
 # ─────────────────────────────────────────
 # ASSETS TO SCAN
@@ -45,9 +45,9 @@ COMMODITY_ASSETS = {
 EMA_FAST        = 9
 EMA_SLOW        = 21
 RSI_PERIOD      = 14
-RSI_LOWER_BAND  = 40
-RSI_UPPER_BAND  = 60
-MIN_CONFIDENCE  = 55   # only trade signals above this %
+RSI_LOWER_BAND  = 45
+RSI_UPPER_BAND  = 55
+MIN_CONFIDENCE  = 70   # only trade signals above this %
 
 # ─────────────────────────────────────────
 # API KEYS  (set all in Render dashboard)
