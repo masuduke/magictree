@@ -1,4 +1,4 @@
-"""
+﻿"""
 config.py  v3 — Expanded Assets + Consistent Profit Settings
 """
 import os
@@ -132,3 +132,10 @@ VIDEOS_DIR   = 'outputs/videos'
 CHANNEL_NAME    = os.getenv('CHANNEL_NAME',   '£500 Trading Challenge')
 CHANNEL_HANDLE  = os.getenv('CHANNEL_HANDLE', '@TradingFromZero')
 CURRENCY_SYMBOL = '£'
+
+# Leverage per asset type
+LEVERAGE_CRYPTO = int(os.getenv('LEVERAGE_CRYPTO', '2'))
+LEVERAGE_FOREX = int(os.getenv('LEVERAGE_FOREX', '30'))
+LEVERAGE_STOCK = int(os.getenv('LEVERAGE_STOCK', '5'))
+LEVERAGE_ETF = int(os.getenv('LEVERAGE_ETF', '5'))
+LEVERAGE_COMMODITY = int(os.getenv('LEVERAGE_COMMODITY', '20'))

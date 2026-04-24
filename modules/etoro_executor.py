@@ -119,7 +119,7 @@ def open_trade(signal: dict, capital: float, cfg) -> dict:
                 'amount':        amount,         # USD amount to invest
                 'takeProfit':    tp,
                 'stopLoss':      sl,
-                'leverageId':    1,              # 1 = no leverage (safest)
+                'leverageId':    cfg.LEVERAGE if hasattr(cfg, 'LEVERAGE') else 2,
                 'portfolioType': 'agent',        # uses Agent Portfolio
             },
             timeout=20
