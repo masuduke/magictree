@@ -1,5 +1,5 @@
-﻿"""
-config.py  —  All settings. Edit via Render environment variables.
+"""
+config.py  v3 — Expanded Assets + Consistent Profit Settings
 """
 import os
 
@@ -8,67 +8,102 @@ import os
 # ─────────────────────────────────────────
 PAPER_TRADE        = os.getenv('PAPER_TRADE', 'true').lower() == 'true'
 INITIAL_CAPITAL    = float(os.getenv('INITIAL_CAPITAL', '500'))
-RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '0.01'))   # 2% risk
-TAKE_PROFIT_PCT    = float(os.getenv('TAKE_PROFIT_PCT', '0.02'))   # 1% TP
-STOP_LOSS_PCT      = float(os.getenv('STOP_LOSS_PCT',     '0.01'))   # 1% SL
-MAX_TRADES_PER_DAY = int(os.getenv('MAX_TRADES_PER_DAY', '2'))
+RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '0.01'))   # 1% risk = £5 max loss
+TAKE_PROFIT_PCT    = float(os.getenv('TAKE_PROFIT_PCT',   '0.03'))   # 3% target = £15 profit
+STOP_LOSS_PCT      = float(os.getenv('STOP_LOSS_PCT',     '0.01'))   # 1% stop  = £5 max loss
+MAX_TRADES_PER_DAY = int(os.getenv('MAX_TRADES_PER_DAY',   '3'))
+MAX_DAILY_LOSS     = float(os.getenv('MAX_DAILY_LOSS',    '25'))     # Stop trading if down £25
 
 # ─────────────────────────────────────────
-# ASSETS TO SCAN
+# EXPANDED ASSET UNIVERSE
 # ─────────────────────────────────────────
 
-# Crypto — scanned 24/7 via Binance
-CRYPTO_ASSETS = ['BTC/USDT', 'ETH/USDT']
+# ── Crypto (24/7 via Binance) ──────────────────────────────────────────────────
+CRYPTO_ASSETS = [
+    'BTC/USDT',   # Bitcoin       — most liquid crypto
+    'ETH/USDT',   # Ethereum      — strong technicals
+    'SOL/USDT',   # Solana        — high momentum 2026
+    'BNB/USDT',   # Binance Coin  — stable, good volume
+]
 
-# Stocks — scanned during market hours (14:00–21:00 UTC Mon–Fri)
-# All executable on eToro
+# ── Forex (24/5 via yfinance) ─────────────────────────────────────────────────
+# Most liquid market in the world — tight spreads, predictable patterns
+FOREX_ASSETS = {
+    'EURUSD=X':  'EUR/USD',   # Most traded pair
+    'GBPUSD=X':  'GBP/USD',   # Good for UK-based content
+    'USDJPY=X':  'USD/JPY',   # Very liquid
+    'AUDUSD=X':  'AUD/USD',   # Commodity-linked
+}
+
+# ── Stocks — AI & Tech focused (market hours only) ────────────────────────────
 STOCK_ASSETS = {
     'AAPL':  'Apple',
-    'TSLA':  'Tesla',
-    'NVDA':  'Nvidia',
+    'NVDA':  'Nvidia',       # AI leader — most volatile/profitable
+    'MSFT':  'Microsoft',
     'AMZN':  'Amazon',
     'META':  'Meta',
-    'MSFT':  'Microsoft',
+    'TSLA':  'Tesla',
+    'GOOGL': 'Google',
+    'AMD':   'AMD',          # AI chips
 }
 
-# Commodities — scanned 24/5 via yfinance futures
-# All executable on eToro
-COMMODITY_ASSETS = {
-    'GC=F': 'GOLD',
-    #'SI=F': 'SILVER',  # Blocked - too volatile
-    #'CL=F': 'OIL',  # Blocked - Middle East war
+# ── ETFs (market hours only) ──────────────────────────────────────────────────
+# More stable than individual stocks — good for consistent signals
+ETF_ASSETS = {
+    'SPY':   'S&P 500 ETF',      # Most liquid ETF
+    'QQQ':   'Nasdaq ETF',       # Tech-heavy
+    'GLD':   'Gold ETF',         # Gold exposure via stock market
+    'SLV':   'Silver ETF',       # Silver without futures risk
 }
+
+# ── Commodities (via yfinance futures) ────────────────────────────────────────
+COMMODITY_ASSETS = {
+    'GC=F':  'GOLD',             # Most reliable commodity signal
+    # OIL and SILVER removed — too volatile in current geopolitical climate
+}
+
+# ── Session hours (UTC) ───────────────────────────────────────────────────────
+LONDON_OPEN   = 8    # Best for Forex
+LONDON_CLOSE  = 17
+NY_OPEN       = 14   # Best for Stocks + Forex overlap
+NY_CLOSE      = 21
 
 # ─────────────────────────────────────────
 # TECHNICAL INDICATOR SETTINGS
 # ─────────────────────────────────────────
 EMA_FAST        = 9
 EMA_SLOW        = 21
+EMA_TREND       = 50    # Trend filter
 RSI_PERIOD      = 14
-RSI_LOWER_BAND  = 45
-RSI_UPPER_BAND  = 55
-MIN_CONFIDENCE  = 70   # only trade signals above this %
+RSI_LOWER_BAND  = int(os.getenv('RSI_LOWER_BAND', '45'))
+RSI_UPPER_BAND  = int(os.getenv('RSI_UPPER_BAND', '55'))
+MIN_CONFIDENCE  = int(os.getenv('MIN_CONFIDENCE', '80'))
 
 # ─────────────────────────────────────────
-# API KEYS  (set all in Render dashboard)
+# MULTI-TIMEFRAME SETTINGS
 # ─────────────────────────────────────────
+# Bot checks 1hr chart to confirm 15min signal direction
+CONFIRM_HIGHER_TIMEFRAME = True
 
+# ─────────────────────────────────────────
+# RISK MANAGEMENT RULES
+# ─────────────────────────────────────────
+MAX_OPEN_TRADES        = 2      # Never have more than 2 open at once
+MAX_SAME_DIRECTION     = 1      # Max 1 BUY and 1 SELL open at same time
+TRAILING_STOP_ENABLED  = True   # Lock in profits as price moves
+TRAILING_STOP_PCT      = 0.005  # Trail by 0.5%
+CORRELATION_CHECK      = True   # Don't trade correlated assets together
+NEWS_BLACKOUT_MINS     = 30     # Skip trading 30 mins around major news
+
+# ─────────────────────────────────────────
+# API KEYS
+# ─────────────────────────────────────────
 ANTHROPIC_API_KEY      = os.getenv('ANTHROPIC_API_KEY', '')
-
-# ── eToro (main broker — handles ALL asset types) ──────────────────────────
 ETORO_API_KEY          = os.getenv('ETORO_API_KEY', '')
-# NOTE: Create an "Agent Portfolio" in eToro settings and fund it with £500
-# The API key is scoped ONLY to that portfolio — your main account is safe
-
-# ── Binance (optional — only needed if you want crypto on Binance instead) ──
 BINANCE_API_KEY        = os.getenv('BINANCE_API_KEY', '')
 BINANCE_SECRET_KEY     = os.getenv('BINANCE_SECRET_KEY', '')
-
-# ── Telegram ────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN     = os.getenv('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID       = os.getenv('TELEGRAM_CHAT_ID', '')
-
-# ── Social media ────────────────────────────────────────────────────────────
 INSTAGRAM_ACCESS_TOKEN = os.getenv('INSTAGRAM_ACCESS_TOKEN', '')
 INSTAGRAM_ACCOUNT_ID   = os.getenv('INSTAGRAM_ACCOUNT_ID', '')
 YOUTUBE_REFRESH_TOKEN  = os.getenv('YOUTUBE_REFRESH_TOKEN', '')
@@ -94,6 +129,6 @@ VIDEOS_DIR   = 'outputs/videos'
 # ─────────────────────────────────────────
 # BRANDING
 # ─────────────────────────────────────────
-CHANNEL_NAME    = os.getenv('CHANNEL_NAME',    '£500 Trading Challenge')
-CHANNEL_HANDLE  = os.getenv('CHANNEL_HANDLE',  '@TradingFromZero')
+CHANNEL_NAME    = os.getenv('CHANNEL_NAME',   '£500 Trading Challenge')
+CHANNEL_HANDLE  = os.getenv('CHANNEL_HANDLE', '@TradingFromZero')
 CURRENCY_SYMBOL = '£'

@@ -1,175 +1,212 @@
-﻿"""
-main.py
--------
-THE BRAIN OF THE TRADING BOT.
-
-What it does every 15 minutes:
-  1. Scans BTC, ETH, Gold for EMA + RSI signals
-  2. If signal found and daily trade limit not reached → opens trade
-  3. Checks open trades → closes at TP or SL
-  4. Sends Telegram alerts
-
-What it does once a day at 8 PM UTC:
-  1. Generates AI content (script, captions) via Anthropic
-  2. Creates slides + video showing the journey
-  3. Posts to Instagram, YouTube, TikTok
-  4. Sends daily Telegram summary
 """
+main.py  v3 — Full Risk Management Edition
+-------------------------------------------
+Every 15 min:
+  1. Check daily loss limit — stop if exceeded
+  2. Check max open trades — skip if at limit
+  3. Monitor open trades → close at TP/SL
+  4. Scan ALL asset classes for signals
+  5. AI approves/rejects each signal
+  6. Open trade if approved + correlation check
 
+Every day 8pm UTC:
+  1. Generate AI content via Claude
+  2. Create slides + video
+  3. Post to all social platforms
+  4. Send Telegram daily summary
+"""
 import time
 import logging
 import schedule
-from datetime import datetime
+from datetime import datetime, date
 
 import config as cfg
-from modules import market_scanner, trade_logger
+from modules import trade_logger
 from modules import etoro_executor as trade_executor
 from modules import content_generator, slide_creator, social_publisher, notifier
+from modules import market_scanner
 
-# ── logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level  = logging.INFO,
-    format = '%(asctime)s [%(levelname)s] %(name)s – %(message)s',
+    level   = logging.INFO,
+    format  = '%(asctime)s [%(levelname)s] %(name)s – %(message)s',
     datefmt = '%Y-%m-%d %H:%M:%S',
 )
 logger = logging.getLogger('main')
 
-# ── state ─────────────────────────────────────────────────────────────────────
-_last_signal: dict | None = None   # kept for content generation
+_last_signal = None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SCAN CYCLE  (every 15 minutes)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Daily loss tracking ───────────────────────────────────────────────────────
+
+def _get_daily_pnl():
+    """Calculate today's P&L from closed trades."""
+    today  = date.today().isoformat()
+    trades = trade_logger.load_trades(cfg)
+    return sum(
+        t.get('pnl', 0) for t in trades
+        if t.get('exit_time', '').startswith(today)
+        and t.get('status') == 'CLOSED'
+        and t.get('pnl') is not None
+    )
+
+
+def _daily_loss_exceeded():
+    """Returns True if daily loss limit has been hit."""
+    daily_pnl = _get_daily_pnl()
+    if daily_pnl <= -cfg.MAX_DAILY_LOSS:
+        logger.warning(f"🛑 Daily loss limit hit: £{daily_pnl:.2f} — no more trades today")
+        notifier.send(
+            f"🛑 *Daily Loss Limit Hit*\n"
+            f"P&L today: £{daily_pnl:.2f}\n"
+            f"Limit: £{cfg.MAX_DAILY_LOSS}\n"
+            f"Bot paused until tomorrow.",
+            cfg
+        )
+        return True
+    return False
+
+
+def _count_open_trades():
+    return len(trade_logger.get_open_trades(cfg))
+
+
+# ── Scan cycle ────────────────────────────────────────────────────────────────
 
 def run_scan():
     global _last_signal
-    logger.info("━━━ SCAN CYCLE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    logger.info("━━━ SCAN ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-    # ── 1. Check & close open trades ──────────────────────────────────────────
+    # ── Step 1: Close open trades at TP/SL ────────────────────────────────────
     open_trades = trade_logger.get_open_trades(cfg)
     if open_trades:
         current_prices = market_scanner.get_current_prices(cfg)
-        updated_trades, closed_trades = trade_executor.check_and_close(
-            open_trades, current_prices, cfg
-        )
+        updated, closed = trade_executor.check_and_close(open_trades, current_prices, cfg)
 
-        # Persist updated statuses
         all_trades = trade_logger.load_trades(cfg)
-        id_map     = {t['id']: t for t in updated_trades}
+        id_map     = {t['id']: t for t in updated}
         all_trades = [id_map.get(t['id'], t) for t in all_trades]
         trade_logger.save_trades(all_trades, cfg)
 
-        # Process each closed trade
-        for t in closed_trades:
+        for t in closed:
             new_balance = trade_logger.update_equity(t['pnl'], cfg)
             msg = content_generator.generate_trade_closed_alert(t, new_balance, cfg)
             notifier.send(msg, cfg)
+            logger.info(f"{'✅' if t['result']=='WIN' else '❌'} "
+                        f"{t['asset']} {t['direction']} | "
+                        f"PnL:£{t['pnl']:.2f} | Balance:£{new_balance:.2f}")
 
-    # ── 2. Scan for new signals ───────────────────────────────────────────────
-    today_count = trade_logger.count_today_trades(cfg)
-    if today_count >= cfg.MAX_TRADES_PER_DAY:
-        logger.info(f"⏸ Daily trade limit reached ({cfg.MAX_TRADES_PER_DAY}). Skipping signal check.")
+    # ── Step 2: Check daily loss limit ────────────────────────────────────────
+    if _daily_loss_exceeded():
         return
 
-    signals = market_scanner.scan_markets(cfg)
+    # ── Step 3: Check trade limits ────────────────────────────────────────────
+    today_count = trade_logger.count_today_trades(cfg)
+    if today_count >= cfg.MAX_TRADES_PER_DAY:
+        logger.info(f"⏸ Max trades/day reached ({cfg.MAX_TRADES_PER_DAY})")
+        return
+
+    if _count_open_trades() >= cfg.MAX_OPEN_TRADES:
+        logger.info(f"⏸ Max open trades reached ({cfg.MAX_OPEN_TRADES})")
+        return
+
+    # ── Step 4: Scan markets ───────────────────────────────────────────────────
+    open_trades_fresh = trade_logger.get_open_trades(cfg)
+    signals = market_scanner.scan_markets(cfg, open_trades_fresh)
 
     for signal in signals:
-        # Only take signals with ≥55% confidence
-        if signal['confidence'] < 55:
-            logger.info(f"⚡ Signal confidence too low ({signal['confidence']}%) – skipped.")
+        if signal['confidence'] < cfg.MIN_CONFIDENCE:
             continue
 
         _last_signal = signal
 
-        # Notify via Telegram
+        # Send Telegram alert
         alert = content_generator.generate_signal_alert(signal, cfg)
         notifier.send(alert, cfg)
 
-        # Open the trade
+        # Open trade
         equity = trade_logger.get_equity(cfg)
         trade  = trade_executor.open_trade(signal, equity['balance'], cfg)
         trade_logger.save_trade(trade, cfg)
 
-        # Only one trade per scan cycle
+        logger.info(f"📈 Trade opened: {signal['direction']} {signal['asset']} "
+                    f"@ {signal['price']} | TP:{signal['take_profit']} | SL:{signal['stop_loss']}")
+
+        # Only take ONE trade per scan
         break
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DAILY CONTENT CYCLE  (once per day)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Daily content cycle ───────────────────────────────────────────────────────
 
 def run_daily_content():
-    logger.info("━━━ DAILY CONTENT CYCLE ━━━━━━━━━━━━━━━━━━━━━━")
+    logger.info("━━━ DAILY CONTENT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-    stats = trade_logger.get_stats(cfg)
-
-    # ── 1. Generate AI content ─────────────────────────────────────────────────
-    logger.info("🤖 Generating content with Claude…")
+    stats   = trade_logger.get_stats(cfg)
     content = content_generator.generate_daily_content(stats, _last_signal, cfg)
+    media   = slide_creator.create_daily_content(stats, _last_signal, content, cfg)
+    results = social_publisher.publish_all(media, content, cfg)
 
-    # ── 2. Create slides + video ───────────────────────────────────────────────
-    logger.info("🎨 Creating visual content…")
-    media = slide_creator.create_daily_content(stats, _last_signal, content, cfg)
-
-    # ── 3. Post to all platforms ───────────────────────────────────────────────
-    publish_results = social_publisher.publish_all(media, content, cfg)
-
-    # ── 4. Send daily Telegram summary ─────────────────────────────────────────
     sym    = cfg.CURRENCY_SYMBOL
     s      = stats
     sign   = '+' if s['total_pnl'] >= 0 else ''
-    ok_str = ', '.join(f"{k}: {'✅' if v else '❌'}" for k, v in publish_results.items())
+    daily_pnl = _get_daily_pnl()
+    daily_sign = '+' if daily_pnl >= 0 else ''
+
     summary = (
-        f"📅 *DAILY SUMMARY – Day {s['days_active']}*\n\n"
-        f"Balance:    {sym}{s['balance']:.2f}\n"
-        f"P&L today:  {sign}{sym}{s['total_pnl']:.2f}\n"
-        f"Win rate:   {s['win_rate']}%\n"
-        f"Trades:     {s['total_trades']}\n\n"
-        f"Posts: {ok_str}\n\n"
+        f"📅 *Day {s['days_active']} Summary*\n\n"
+        f"💰 Balance:      {sym}{s['balance']:.2f}\n"
+        f"📊 Today P&L:    {daily_sign}{sym}{daily_pnl:.2f}\n"
+        f"📈 Total P&L:    {sign}{sym}{s['total_pnl']:.2f}\n"
+        f"🎯 Win rate:     {s['win_rate']}%\n"
+        f"🔢 Total trades: {s['total_trades']}\n"
+        f"✅ Wins:         {s['wins']}\n"
+        f"❌ Losses:       {s['losses']}\n\n"
+        f"Posts: {', '.join(f'{k}:{'✅' if v else '❌'}' for k,v in results.items())}\n\n"
         f"_{cfg.CHANNEL_NAME}_"
     )
     notifier.send(summary, cfg)
 
-    # Also send the intro slide to Telegram for quick preview
     if media.get('thumbnail'):
-        notifier.send_photo(media['thumbnail'], f"Day {s['days_active']} summary slide", cfg)
+        notifier.send_photo(media['thumbnail'], f"Day {s['days_active']} slides", cfg)
 
     logger.info("✅ Daily content cycle complete.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SCHEDULER SETUP
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Startup ───────────────────────────────────────────────────────────────────
 
 def main():
-    logger.info("🚀 Trading Bot starting…")
-    logger.info(f"   Mode:            {'📝 PAPER TRADE' if cfg.PAPER_TRADE else '💰 LIVE TRADE'}")
-    logger.info(f"   Capital:         £{cfg.INITIAL_CAPITAL}")
-    logger.info(f"   Scan interval:   {cfg.SCAN_INTERVAL_MINUTES} min")
-    logger.info(f"   Daily post hour: {cfg.DAILY_POST_HOUR}:00 UTC")
-    logger.info(f"   Assets:          {cfg.CRYPTO_ASSETS + list(cfg.COMMODITY_ASSETS.keys())}")
+    logger.info("🚀 Trading Bot v3 starting…")
+    logger.info(f"   Mode:         {'📝 PAPER' if cfg.PAPER_TRADE else '💰 LIVE'}")
+    logger.info(f"   Capital:      £{cfg.INITIAL_CAPITAL}")
+    logger.info(f"   Assets:       Crypto({len(cfg.CRYPTO_ASSETS)}) + "
+                f"Forex({len(cfg.FOREX_ASSETS)}) + "
+                f"Stocks({len(cfg.STOCK_ASSETS)}) + "
+                f"ETFs({len(cfg.ETF_ASSETS)}) + "
+                f"Commodities({len(cfg.COMMODITY_ASSETS)})")
+    logger.info(f"   Min conf:     {cfg.MIN_CONFIDENCE}%")
+    logger.info(f"   TP/SL:        {cfg.TAKE_PROFIT_PCT*100}% / {cfg.STOP_LOSS_PCT*100}%")
+    logger.info(f"   Daily limit:  £{cfg.MAX_DAILY_LOSS} max loss")
+    logger.info(f"   Max trades:   {cfg.MAX_TRADES_PER_DAY}/day | {cfg.MAX_OPEN_TRADES} open")
 
-    # Send startup notification
     notifier.send(
-        f"🚀 *Bot Started*\n"
+        f"🚀 *Trading Bot v3 Started*\n\n"
         f"Mode: {'Paper' if cfg.PAPER_TRADE else 'LIVE'}\n"
         f"Capital: £{cfg.INITIAL_CAPITAL}\n"
-        f"Assets: {', '.join(cfg.CRYPTO_ASSETS + list(cfg.COMMODITY_ASSETS.keys()))}",
+        f"Assets: {len(cfg.CRYPTO_ASSETS)} crypto, {len(cfg.FOREX_ASSETS)} forex, "
+        f"{len(cfg.STOCK_ASSETS)} stocks, {len(cfg.ETF_ASSETS)} ETFs, "
+        f"{len(cfg.COMMODITY_ASSETS)} commodities\n"
+        f"Min confidence: {cfg.MIN_CONFIDENCE}%\n"
+        f"Target: £{cfg.TAKE_PROFIT_PCT*100:.0f}% profit / £{cfg.STOP_LOSS_PCT*100:.0f}% stop\n"
+        f"Daily loss limit: £{cfg.MAX_DAILY_LOSS}",
         cfg
     )
 
-    # Run once immediately
     run_scan()
 
-    # Schedule scan every N minutes
     schedule.every(cfg.SCAN_INTERVAL_MINUTES).minutes.do(run_scan)
+    schedule.every().day.at(f"{cfg.DAILY_POST_HOUR:02d}:00").do(run_daily_content)
 
-    # Schedule daily content post
-    post_time = f"{cfg.DAILY_POST_HOUR:02d}:00"
-    schedule.every().day.at(post_time).do(run_daily_content)
-
-    logger.info(f"📅 Scheduler active – scan every {cfg.SCAN_INTERVAL_MINUTES}min, post at {post_time} UTC")
+    logger.info(f"✅ Running — scan every {cfg.SCAN_INTERVAL_MINUTES}min | "
+                f"post at {cfg.DAILY_POST_HOUR:02d}:00 UTC")
 
     while True:
         schedule.run_pending()
