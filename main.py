@@ -183,7 +183,7 @@ def main():
                 f"ETFs({len(cfg.ETF_ASSETS)}) + "
                 f"Commodities({len(cfg.COMMODITY_ASSETS)})")
     logger.info(f"   Min conf:     {cfg.MIN_CONFIDENCE}%")
-    logger.info(f"   TP/SL:        {cfg.TAKE_PROFIT_PCT*100}% / {cfg.STOP_LOSS_PCT*100}%")
+    logger.info(f"   TP/SL:        Per-asset (BTC:3%/1% SOL:4%/1.3% Forex:0.5%/0.2% Stocks:1.5-3%)")
     logger.info(f"   Daily limit:  £{cfg.MAX_DAILY_LOSS} max loss")
     logger.info(f"   Max trades:   {cfg.MAX_TRADES_PER_DAY}/day | {cfg.MAX_OPEN_TRADES} open")
 
