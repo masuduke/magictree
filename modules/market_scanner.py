@@ -134,9 +134,14 @@ def _fetch_crypto(symbol, timeframe="15m", limit=200):
 def _fetch_yf(ticker, period='5d', interval='15m', limit=200):
     try:
         import yfinance as yf
+        import socket
+        # Set socket timeout to prevent hanging
+        socket.setdefaulttimeout(8)
         raw = yf.download(ticker, period=period, interval=interval,
-                          progress=False, auto_adjust=True)
+                          progress=False, auto_adjust=True,
+                          timeout=8)
         if raw.empty:
+            logger.debug(f"yfinance empty response ({ticker})")
             return None
         df = raw.reset_index()
         df.columns = [str(c[0]) if isinstance(c, tuple) else str(c) for c in df.columns]
@@ -146,7 +151,7 @@ def _fetch_yf(ticker, period='5d', interval='15m', limit=200):
         cols = [c for c in cols if c in df.columns]
         return df[cols].dropna().tail(limit)
     except Exception as e:
-        logger.error(f"yfinance ({ticker}): {e}")
+        logger.debug(f"yfinance ({ticker}): {e}")
         return None
 
 
