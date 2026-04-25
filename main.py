@@ -1,4 +1,4 @@
-﻿"""
+"""
 main.py  v3 — Full Risk Management Edition
 -------------------------------------------
 Every 15 min:
@@ -160,7 +160,7 @@ def run_daily_content():
         f"🔢 Total trades: {s['total_trades']}\n"
         f"✅ Wins:         {s['wins']}\n"
         f"❌ Losses:       {s['losses']}\n\n"
-        f"Posts: {', '.join(f'{k}:{'✅' if v else '❌'}' for k,v in results.items())}\n\n"
+        f"Posts: {', '.join(k + (':OK' if v else ':FAIL') for k,v in results.items())}\n\n"
         f"_{cfg.CHANNEL_NAME}_"
     )
     notifier.send(summary, cfg)
