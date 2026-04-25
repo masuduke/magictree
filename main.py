@@ -1,4 +1,4 @@
-"""
+﻿"""
 main.py  v3 — Full Risk Management Edition
 -------------------------------------------
 Every 15 min:
