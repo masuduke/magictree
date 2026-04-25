@@ -195,7 +195,7 @@ def main():
         f"{len(cfg.STOCK_ASSETS)} stocks, {len(cfg.ETF_ASSETS)} ETFs, "
         f"{len(cfg.COMMODITY_ASSETS)} commodities\n"
         f"Min confidence: {cfg.MIN_CONFIDENCE}%\n"
-        f"Target: £{cfg.TAKE_PROFIT_PCT*100:.0f}% profit / £{cfg.STOP_LOSS_PCT*100:.0f}% stop\n"
+        f"Target: Per-asset (BTC:3% SOL:4% Forex:0.5% Stocks:1.5-3%)\n"
         f"Daily loss limit: £{cfg.MAX_DAILY_LOSS}",
         cfg
     )
