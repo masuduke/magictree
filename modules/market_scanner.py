@@ -109,16 +109,52 @@ def _atr(df, period=14):
 
 # ── Data fetchers ─────────────────────────────────────────────────────────────
 
-def _fetch_crypto(symbol, timeframe='15m', limit=200):
+def _fetch_crypto(symbol, timeframe="15m", limit=200):
+    coin_map = {
+        "BTC/USDT": "bitcoin", "ETH/USDT": "ethereum",
+        "SOL/USDT": "solana",  "BNB/USDT": "binancecoin",
+    }
+    coin_id = coin_map.get(symbol)
+    # Try CoinGecko OHLC (free, no IP bans)
+    if coin_id:
+        try:
+            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc?vs_currency=usd&days=2"
+            r   = requests.get(url, timeout=15, headers={"User-Agent": "TradingBot/1.0"})
+            if r.ok and r.json():
+                df = pd.DataFrame(r.json(), columns=["ts","open","high","low","close"])
+                df["ts"]  = pd.to_datetime(df["ts"], unit="ms")
+                df["vol"] = 0.0
+                return df.astype({"open":float,"high":float,"low":float,"close":float}).tail(limit)
+        except Exception as e:
+            logger.debug(f"CoinGecko OHLC failed ({symbol}): {e}")
+    # Try CoinGecko market chart
+    if coin_id:
+        try:
+            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=2&interval=hourly"
+            r   = requests.get(url, timeout=15, headers={"User-Agent": "TradingBot/1.0"})
+            if r.ok:
+                prices = r.json().get("prices", [])
+                vols   = r.json().get("total_volumes", [])
+                if prices:
+                    df = pd.DataFrame(prices, columns=["ts","close"])
+                    df["ts"]   = pd.to_datetime(df["ts"], unit="ms")
+                    df["open"] = df["close"].shift(1).fillna(df["close"])
+                    df["high"] = df["close"] * 1.001
+                    df["low"]  = df["close"] * 0.999
+                    df["vol"]  = [v[1] for v in vols[:len(df)]] if vols else 0.0
+                    return df.tail(limit)
+        except Exception as e:
+            logger.debug(f"CoinGecko market_chart failed ({symbol}): {e}")
+    # Last resort: ccxt Binance
     try:
         import ccxt
-        ex   = ccxt.binance({'enableRateLimit': True})
-        data = ex.fetch_ohlcv(symbol, timeframe, limit=limit)
-        df   = pd.DataFrame(data, columns=['ts','open','high','low','close','vol'])
-        df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-        return df.astype({'open':float,'high':float,'low':float,'close':float,'vol':float})
+        ex   = ccxt.binance({"enableRateLimit": True, "timeout": 10000})
+        data = ex.fetch_ohlcv(symbol, timeframe, limit=min(limit, 50))
+        df   = pd.DataFrame(data, columns=["ts","open","high","low","close","vol"])
+        df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+        return df.astype({"open":float,"high":float,"low":float,"close":float,"vol":float})
     except Exception as e:
-        logger.error(f"Crypto fetch ({symbol}): {e}")
+        logger.error(f"All crypto fetchers failed ({symbol}): {e}")
         return None
 
 
