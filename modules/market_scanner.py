@@ -22,6 +22,7 @@ import re
 import requests
 import pandas as pd
 from datetime import datetime
+from modules import asset_config
 
 logger = logging.getLogger(__name__)
 
@@ -526,6 +527,12 @@ def _build_signal(df, asset, asset_type, cfg, open_trades=None):
         'ai_reasoning':    ai.get('reasoning'),
         'ai_risk':         ai.get('key_risk'),
         'top_headlines':   sentiment.get('headlines', [])[:3],
+        'tp_pct':          tp_pct,
+        'sl_pct':          sl_pct,
+        'max_hours':       asset_config.get_max_hours(asset),
+        'leverage':        asset_config.get_leverage(asset),
+        'asset_label':     asset_config.get_label(asset),
+        'asset_emoji':     asset_config.get_emoji(asset),
     }
 
 

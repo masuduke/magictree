@@ -1,4 +1,4 @@
-﻿"""
+"""
 etoro_executor.py
 ------------------
 Executes trades on eToro via their official API.
@@ -14,7 +14,7 @@ Setup:
 """
 import logging
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +71,8 @@ def open_trade(signal: dict, capital: float, cfg) -> dict:
     tp      = signal['take_profit']
     sl      = signal['stop_loss']
     pos_sz  = _position_size(capital, cfg.RISK_PER_TRADE_PCT, entry, sl)
-    risk_gbp  = round(capital * cfg.RISK_PER_TRADE_PCT, 2)
-    amount  = risk_gbp * 10   # invest 10x risk amount (uses 1:10 leverage concept)
+    risk_£  = round(capital * cfg.RISK_PER_TRADE_PCT, 2)
+    amount  = risk_£ * 10   # invest 10x risk amount (uses 1:10 leverage concept)
 
     trade = {
         'id':              datetime.utcnow().strftime('%Y%m%d%H%M%S'),
@@ -83,8 +83,8 @@ def open_trade(signal: dict, capital: float, cfg) -> dict:
         'take_profit':     tp,
         'stop_loss':       sl,
         'position_size':   pos_sz,
-        'risk_amount':     risk_gbp,
-        'potential_profit': risk_gbp,
+        'risk_amount':     risk_£,
+        'potential_profit': risk_£,
         'confidence':      signal['confidence'],
         'entry_time':      signal['timestamp'],
         'status':          'OPEN',
@@ -101,7 +101,7 @@ def open_trade(signal: dict, capital: float, cfg) -> dict:
     if cfg.PAPER_TRADE:
         trade['order_id'] = f"PAPER_{trade['id']}"
         logger.info(f"📝 [PAPER] {signal['direction']} {signal['asset']} @ {entry} "
-                    f"| TP:{tp} SL:{sl} | Risk:£{risk_gbp}")
+                    f"| TP:{tp} SL:{sl} | Risk:£{risk_£}")
         return trade
 
     # ── Real eToro order ───────────────────────────────────────────────────────
@@ -119,7 +119,7 @@ def open_trade(signal: dict, capital: float, cfg) -> dict:
                 'amount':        amount,         # USD amount to invest
                 'takeProfit':    tp,
                 'stopLoss':      sl,
-                'leverageId':    cfg.LEVERAGE if hasattr(cfg, 'LEVERAGE') else 2,
+                'leverageId':    1,              # 1 = no leverage (safest)
                 'portfolioType': 'agent',        # uses Agent Portfolio
             },
             timeout=20
@@ -174,12 +174,13 @@ def check_and_close(open_trades: list, current_prices: dict, cfg) -> tuple:
                 _close_etoro_position(t['order_id'], cfg)
 
             t.update({
-                'status':    'CLOSED',
-                'result':    result,
+                'status':     'CLOSED',
+                'result':     result,
                 'exit_price': round(price, 6),
-                'exit_time': datetime.utcnow().isoformat(),
-                'pnl':       round(pnl, 2),
-                'pnl_pct':   round(pnl / t['capital_before'] * 100, 2),
+                'exit_time':  datetime.utcnow().isoformat(),
+                'pnl':        round(pnl, 2),
+                'pnl_pct':    round(pnl / t['capital_before'] * 100, 2),
+                'close_reason': 'TP' if hit_tp else 'SL' if hit_sl else 'TIME',
             })
             closed.append(t)
             icon = '✅' if hit_tp else '❌'
