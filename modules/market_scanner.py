@@ -110,52 +110,24 @@ def _atr(df, period=14):
 # ── Data fetchers ─────────────────────────────────────────────────────────────
 
 def _fetch_crypto(symbol, timeframe="15m", limit=200):
-    coin_map = {
-        "BTC/USDT": "bitcoin", "ETH/USDT": "ethereum",
-        "SOL/USDT": "solana",  "BNB/USDT": "binancecoin",
+    """
+    Fetches crypto data via yfinance — reliable, no IP bans.
+    yfinance supports BTC-USD, ETH-USD, SOL-USD, BNB-USD
+    """
+    # Map ccxt symbol format to yfinance format
+    yf_map = {
+        "BTC/USDT": "BTC-USD",
+        "ETH/USDT": "ETH-USD",
+        "SOL/USDT": "SOL-USD",
+        "BNB/USDT": "BNB-USD",
     }
-    coin_id = coin_map.get(symbol)
-    # Try CoinGecko OHLC (free, no IP bans)
-    if coin_id:
-        try:
-            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc?vs_currency=usd&days=2"
-            r   = requests.get(url, timeout=15, headers={"User-Agent": "TradingBot/1.0"})
-            if r.ok and r.json():
-                df = pd.DataFrame(r.json(), columns=["ts","open","high","low","close"])
-                df["ts"]  = pd.to_datetime(df["ts"], unit="ms")
-                df["vol"] = 0.0
-                return df.astype({"open":float,"high":float,"low":float,"close":float}).tail(limit)
-        except Exception as e:
-            logger.debug(f"CoinGecko OHLC failed ({symbol}): {e}")
-    # Try CoinGecko market chart
-    if coin_id:
-        try:
-            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=2&interval=hourly"
-            r   = requests.get(url, timeout=15, headers={"User-Agent": "TradingBot/1.0"})
-            if r.ok:
-                prices = r.json().get("prices", [])
-                vols   = r.json().get("total_volumes", [])
-                if prices:
-                    df = pd.DataFrame(prices, columns=["ts","close"])
-                    df["ts"]   = pd.to_datetime(df["ts"], unit="ms")
-                    df["open"] = df["close"].shift(1).fillna(df["close"])
-                    df["high"] = df["close"] * 1.001
-                    df["low"]  = df["close"] * 0.999
-                    df["vol"]  = [v[1] for v in vols[:len(df)]] if vols else 0.0
-                    return df.tail(limit)
-        except Exception as e:
-            logger.debug(f"CoinGecko market_chart failed ({symbol}): {e}")
-    # Last resort: ccxt Binance
-    try:
-        import ccxt
-        ex   = ccxt.binance({"enableRateLimit": True, "timeout": 10000})
-        data = ex.fetch_ohlcv(symbol, timeframe, limit=min(limit, 50))
-        df   = pd.DataFrame(data, columns=["ts","open","high","low","close","vol"])
-        df["ts"] = pd.to_datetime(df["ts"], unit="ms")
-        return df.astype({"open":float,"high":float,"low":float,"close":float,"vol":float})
-    except Exception as e:
-        logger.error(f"All crypto fetchers failed ({symbol}): {e}")
-        return None
+    yf_ticker = yf_map.get(symbol, symbol.replace("/USDT", "-USD"))
+    df = _fetch_yf(yf_ticker, period="5d", interval="15m", limit=limit)
+    if df is not None and not df.empty:
+        logger.debug(f"yfinance crypto OK: {symbol} ({len(df)} candles)")
+        return df
+    logger.error(f"Crypto fetch failed ({symbol})")
+    return None
 
 
 def _fetch_yf(ticker, period='5d', interval='15m', limit=200):
