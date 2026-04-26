@@ -79,7 +79,8 @@ ETF_ASSETS = {
 
 # Commodities
 COMMODITY_ASSETS = {
-    'GC=F': 'GOLD',
+    'GC=F':  'GOLD',
+    'SI=F':  'SILVER',
 }
 
 # ─────────────────────────────────────────

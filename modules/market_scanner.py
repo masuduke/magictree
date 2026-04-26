@@ -321,12 +321,20 @@ def scan_markets(cfg, open_trades=None):
     else:
         logger.info("Stocks/ETFs: market closed")
 
-    # ── Commodities ───────────────────────────────────────────────────────────
+    # -- Commodities
     for ticker, name in cfg.COMMODITY_ASSETS.items():
-        df = _fetch_yf(ticker)
-        s  = _build_signal(df, name, 'commodity', cfg, open_trades)
+        df = _fetch_yf(ticker, period="5d", interval="15m", limit=200)
+        if df is None or df.empty:
+            df = _fetch_yf(ticker, period="1mo", interval="1h", limit=200)
+        if df is None or df.empty:
+            if "GC" in ticker:
+                df = _fetch_yf("GLD", period="5d", interval="15m", limit=200)
+                logger.info("Using GLD as Gold fallback")
+            elif "SI" in ticker:
+                df = _fetch_yf("SLV", period="5d", interval="15m", limit=200)
+                logger.info("Using SLV as Silver fallback")
+        s = _build_signal(df, name, "commodity", cfg, open_trades)
         if s: signals.append(s)
-
     # Sort: forex overlap first, then by confidence
     signals.sort(key=lambda x: (-x.get('is_overlap',0), -x['confidence']))
 
