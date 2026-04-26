@@ -1,5 +1,5 @@
-﻿"""
-config.py  v3 — Expanded Assets + Consistent Profit Settings
+"""
+config.py v4 — Optimised for £25/day from £100
 """
 import os
 
@@ -7,99 +7,103 @@ import os
 # TRADING SETTINGS
 # ─────────────────────────────────────────
 PAPER_TRADE        = os.getenv('PAPER_TRADE', 'true').lower() == 'true'
-INITIAL_CAPITAL    = float(os.getenv('INITIAL_CAPITAL', '500'))
-RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '0.01'))   # 1% risk = £5 max loss
-TAKE_PROFIT_PCT    = float(os.getenv('TAKE_PROFIT_PCT',   '0.03'))   # 3% target = £15 profit
-STOP_LOSS_PCT      = float(os.getenv('STOP_LOSS_PCT',     '0.01'))   # 1% stop  = £5 max loss
-MAX_TRADES_PER_DAY = int(os.getenv('MAX_TRADES_PER_DAY',   '3'))
-MAX_DAILY_LOSS     = float(os.getenv('MAX_DAILY_LOSS',    '25'))     # Stop trading if down £25
+INITIAL_CAPITAL    = float(os.getenv('INITIAL_CAPITAL', '100'))
+RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '0.01'))
+TAKE_PROFIT_PCT    = float(os.getenv('TAKE_PROFIT_PCT',   '0.005'))  # Default forex
+STOP_LOSS_PCT      = float(os.getenv('STOP_LOSS_PCT',     '0.002'))  # Default forex
+MAX_TRADES_PER_DAY = int(os.getenv('MAX_TRADES_PER_DAY',   '5'))
+MAX_DAILY_LOSS     = float(os.getenv('MAX_DAILY_LOSS',    '25'))
+MAX_OPEN_TRADES    = int(os.getenv('MAX_OPEN_TRADES',      '3'))
+
+# ─────────────────────────────────────────
+# SIGNAL QUALITY
+# ─────────────────────────────────────────
+MIN_CONFIDENCE         = int(os.getenv('MIN_CONFIDENCE', '65'))
+MIN_STRATEGY_SCORE     = int(os.getenv('MIN_STRATEGY_SCORE', '55'))
+CONFIRM_HIGHER_TF      = os.getenv('CONFIRM_HIGHER_TF', 'true').lower() == 'true'
+CORRELATION_CHECK      = True
+MAX_SAME_DIRECTION     = 2
+
+# ─────────────────────────────────────────
+# TECHNICAL SETTINGS
+# ─────────────────────────────────────────
+EMA_FAST        = 9
+EMA_SLOW        = 21
+RSI_PERIOD      = 14
+RSI_LOWER_BAND  = int(os.getenv('RSI_LOWER_BAND', '42'))
+RSI_UPPER_BAND  = int(os.getenv('RSI_UPPER_BAND', '58'))
 
 # ─────────────────────────────────────────
 # EXPANDED ASSET UNIVERSE
 # ─────────────────────────────────────────
 
-# ── Crypto (24/7 via Binance) ──────────────────────────────────────────────────
-CRYPTO_ASSETS = [
-    'BTC/USDT',   # Bitcoin       — most liquid crypto
-    'ETH/USDT',   # Ethereum      — strong technicals
-    'SOL/USDT',   # Solana        — high momentum 2026
-    'BNB/USDT',   # Binance Coin  — stable, good volume
-]
+# Crypto — 24/7, yfinance ticker format
+CRYPTO_ASSETS = {
+    'BTC/USDT':  'BTC-USD',
+    'ETH/USDT':  'ETH-USD',
+    'SOL/USDT':  'SOL-USD',
+    'BNB/USDT':  'BNB-USD',
+    'DOGE/USDT': 'DOGE-USD',
+    'AVAX/USDT': 'AVAX-USD',
+}
 
-# ── Forex (24/5 via yfinance) ─────────────────────────────────────────────────
-# Most liquid market in the world — tight spreads, predictable patterns
+# Forex — highest priority, London+NY sessions (30x leverage)
 FOREX_ASSETS = {
-    'EURUSD=X':  'EUR/USD',   # Most traded pair
-    'GBPUSD=X':  'GBP/USD',   # Good for UK-based content
-    'USDJPY=X':  'USD/JPY',   # Very liquid
-    'AUDUSD=X':  'AUD/USD',   # Commodity-linked
+    'EURUSD=X': 'EUR/USD',
+    'GBPUSD=X': 'GBP/USD',
+    'USDJPY=X': 'USD/JPY',
+    'AUDUSD=X': 'AUD/USD',
+    'USDCAD=X': 'USD/CAD',
+    'EURGBP=X': 'EUR/GBP',
 }
 
-# ── Stocks — AI & Tech focused (market hours only) ────────────────────────────
+# Stocks — NY session only
 STOCK_ASSETS = {
-    'AAPL':  'Apple',
-    'NVDA':  'Nvidia',       # AI leader — most volatile/profitable
-    'MSFT':  'Microsoft',
-    'AMZN':  'Amazon',
-    'META':  'Meta',
+    'NVDA':  'Nvidia',
     'TSLA':  'Tesla',
+    'AMD':   'AMD',
+    'META':  'Meta',
+    'AMZN':  'Amazon',
     'GOOGL': 'Google',
-    'AMD':   'AMD',          # AI chips
+    'AAPL':  'Apple',
+    'MSFT':  'Microsoft',
 }
 
-# ── ETFs (market hours only) ──────────────────────────────────────────────────
-# More stable than individual stocks — good for consistent signals
+# ETFs
 ETF_ASSETS = {
-    'SPY':   'S&P 500 ETF',      # Most liquid ETF
-    'QQQ':   'Nasdaq ETF',       # Tech-heavy
-    'GLD':   'Gold ETF',         # Gold exposure via stock market
-    'SLV':   'Silver ETF',       # Silver without futures risk
+    'SPY': 'S&P 500 ETF',
+    'QQQ': 'Nasdaq ETF',
+    'GLD': 'Gold ETF',
+    'SLV': 'Silver ETF',
 }
 
-# ── Commodities (via yfinance futures) ────────────────────────────────────────
+# Commodities
 COMMODITY_ASSETS = {
-    'GC=F':  'GOLD',             # Most reliable commodity signal
-    # OIL and SILVER removed — too volatile in current geopolitical climate
+    'GC=F': 'GOLD',
 }
 
-# ── Session hours (UTC) ───────────────────────────────────────────────────────
-LONDON_OPEN   = 8    # Best for Forex
-LONDON_CLOSE  = 17
-NY_OPEN       = 14   # Best for Stocks + Forex overlap
-NY_CLOSE      = 21
+# ─────────────────────────────────────────
+# SESSION HOURS (UTC)
+# ─────────────────────────────────────────
+LONDON_OPEN  = 8
+LONDON_CLOSE = 17
+NY_OPEN      = 14
+NY_CLOSE     = 21
 
 # ─────────────────────────────────────────
-# TECHNICAL INDICATOR SETTINGS
+# TRAILING STOP
 # ─────────────────────────────────────────
-EMA_FAST        = 9
-EMA_SLOW        = 21
-EMA_TREND       = 50    # Trend filter
-RSI_PERIOD      = 14
-RSI_LOWER_BAND  = int(os.getenv('RSI_LOWER_BAND', '45'))
-RSI_UPPER_BAND  = int(os.getenv('RSI_UPPER_BAND', '55'))
-MIN_CONFIDENCE  = int(os.getenv('MIN_CONFIDENCE', '80'))
-
-# ─────────────────────────────────────────
-# MULTI-TIMEFRAME SETTINGS
-# ─────────────────────────────────────────
-# Bot checks 1hr chart to confirm 15min signal direction
-CONFIRM_HIGHER_TIMEFRAME = True
-
-# ─────────────────────────────────────────
-# RISK MANAGEMENT RULES
-# ─────────────────────────────────────────
-MAX_OPEN_TRADES        = 2      # Never have more than 2 open at once
-MAX_SAME_DIRECTION     = 1      # Max 1 BUY and 1 SELL open at same time
-TRAILING_STOP_ENABLED  = True   # Lock in profits as price moves
-TRAILING_STOP_PCT      = 0.005  # Trail by 0.5%
-CORRELATION_CHECK      = True   # Don't trade correlated assets together
-NEWS_BLACKOUT_MINS     = 30     # Skip trading 30 mins around major news
+TRAILING_STOP_ENABLED = True
+TRAILING_STOP_PCT     = 0.003
 
 # ─────────────────────────────────────────
 # API KEYS
 # ─────────────────────────────────────────
 ANTHROPIC_API_KEY      = os.getenv('ANTHROPIC_API_KEY', '')
 ETORO_API_KEY          = os.getenv('ETORO_API_KEY', '')
+CAPITAL_API_KEY        = os.getenv('CAPITAL_API_KEY', '')
+CAPITAL_EMAIL          = os.getenv('CAPITAL_EMAIL', '')
+CAPITAL_PASSWORD       = os.getenv('CAPITAL_PASSWORD', '')
 BINANCE_API_KEY        = os.getenv('BINANCE_API_KEY', '')
 BINANCE_SECRET_KEY     = os.getenv('BINANCE_SECRET_KEY', '')
 TELEGRAM_BOT_TOKEN     = os.getenv('TELEGRAM_BOT_TOKEN', '')
@@ -115,27 +119,16 @@ CLOUDINARY_URL         = os.getenv('CLOUDINARY_URL', '')
 # ─────────────────────────────────────────
 # SCHEDULER
 # ─────────────────────────────────────────
-SCAN_INTERVAL_MINUTES  = int(os.getenv('SCAN_INTERVAL_MINUTES', '15'))
-DAILY_POST_HOUR        = int(os.getenv('DAILY_POST_HOUR', '20'))
+SCAN_INTERVAL_MINUTES = int(os.getenv('SCAN_INTERVAL_MINUTES', '15'))
+DAILY_POST_HOUR       = int(os.getenv('DAILY_POST_HOUR', '20'))
 
 # ─────────────────────────────────────────
-# PATHS
+# PATHS + BRANDING
 # ─────────────────────────────────────────
-DATA_FILE    = 'data/trades.json'
-EQUITY_FILE  = 'data/equity.json'
-SLIDES_DIR   = 'outputs/slides'
-VIDEOS_DIR   = 'outputs/videos'
-
-# ─────────────────────────────────────────
-# BRANDING
-# ─────────────────────────────────────────
+DATA_FILE       = 'data/trades.json'
+EQUITY_FILE     = 'data/equity.json'
+SLIDES_DIR      = 'outputs/slides'
+VIDEOS_DIR      = 'outputs/videos'
 CHANNEL_NAME    = os.getenv('CHANNEL_NAME',   '£500 Trading Challenge')
 CHANNEL_HANDLE  = os.getenv('CHANNEL_HANDLE', '@TradingFromZero')
 CURRENCY_SYMBOL = '£'
-
-# Leverage per asset type
-LEVERAGE_CRYPTO = int(os.getenv('LEVERAGE_CRYPTO', '2'))
-LEVERAGE_FOREX = int(os.getenv('LEVERAGE_FOREX', '30'))
-LEVERAGE_STOCK = int(os.getenv('LEVERAGE_STOCK', '5'))
-LEVERAGE_ETF = int(os.getenv('LEVERAGE_ETF', '5'))
-LEVERAGE_COMMODITY = int(os.getenv('LEVERAGE_COMMODITY', '20'))
