@@ -39,7 +39,8 @@ def _daily_pnl():
     today = date.today().isoformat()
     return sum(
         t.get('pnl', 0) for t in trade_logger.load_trades(cfg)
-        if t.get('exit_time','').startswith(today)
+        if isinstance(t.get('exit_time'), str)
+        and t.get('exit_time','').startswith(today)
         and t.get('status') == 'CLOSED'
         and t.get('pnl') is not None
     )
