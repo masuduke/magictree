@@ -392,15 +392,40 @@ def momentum_breakout(df):
 
 # ── Run all strategies, pick best ─────────────────────────────────────────────
 
-def best_signal(df, asset_type='crypto'):
+def get_market_regime(btc_df=None):
+    """
+    Detects overall crypto market direction using BTC trend.
+    Returns: 'BULLISH', 'BEARISH', or 'NEUTRAL'
+    """
+    if btc_df is None or len(btc_df) < 50:
+        return 'NEUTRAL'
+    try:
+        close  = btc_df['close'].astype(float)
+        ema50  = _ema(close, 50)
+        ema200 = _ema(close, 200) if len(close) >= 200 else _ema(close, 50)
+        price  = float(close.iloc[-1])
+        e50    = float(ema50.iloc[-1])
+        e200   = float(ema200.iloc[-1])
+        if price > e50 and e50 > e200:
+            return 'BULLISH'
+        elif price < e50 and e50 < e200:
+            return 'BEARISH'
+        else:
+            return 'NEUTRAL'
+    except Exception:
+        return 'NEUTRAL'
+
+
+def best_signal(df, asset_type='crypto', market_regime='NEUTRAL'):
     """
     Runs all 4 strategies on the same data.
     Returns the highest-scoring valid signal, or None.
     
-    Strategy selection by asset type:
-    - Crypto/Stocks: All 4 strategies
-    - Forex:         EMA + Momentum (cleaner trends)
-    - Commodities:   EMA + BB + RSI (slower moving)
+    Market regime filter:
+    - BULLISH market → only BUY signals on crypto
+    - BEARISH market → only SELL signals on crypto
+    - NEUTRAL → both directions allowed
+    - Stocks/Forex/Commodities → no regime filter
     """
     candidates = []
 
@@ -418,6 +443,14 @@ def best_signal(df, asset_type='crypto'):
         try:
             sig = runner(df)
             if sig and sig['score'] >= 45:
+                # Apply market regime filter for crypto
+                if asset_type == 'crypto' and market_regime != 'NEUTRAL':
+                    if market_regime == 'BULLISH' and sig['direction'] == 'SELL':
+                        logger.debug(f"Regime filter: blocked SELL in BULLISH market")
+                        continue
+                    if market_regime == 'BEARISH' and sig['direction'] == 'BUY':
+                        logger.debug(f"Regime filter: blocked BUY in BEARISH market")
+                        continue
                 candidates.append(sig)
         except Exception as e:
             logger.debug(f"Strategy {runner.__name__} error: {e}")

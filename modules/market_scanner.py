@@ -192,12 +192,12 @@ def _correlation_ok(asset, direction, open_trades):
 
 # ── Main signal builder ───────────────────────────────────────────────────────
 
-def _build_signal(df, asset, asset_type, cfg, open_trades):
+def _build_signal(df, asset, asset_type, cfg, open_trades, market_regime="NEUTRAL"):
     if df is None or len(df) < 30:
         return None
 
     # Run all strategies, get best signal
-    sig = strategies.best_signal(df, asset_type)
+    sig = strategies.best_signal(df, asset_type, market_regime)
     if not sig or sig['score'] < cfg.MIN_STRATEGY_SCORE:
         return None
 
@@ -292,9 +292,14 @@ def scan_markets(cfg, open_trades=None):
     in_overlap = _is_overlap(cfg)
 
     # ── Crypto (24/7) ─────────────────────────────────────────────────────────
+    # Detect overall crypto market regime using BTC trend
+    btc_df = _fetch_yf('BTC-USD', period='30d', interval='1h', limit=200)
+    market_regime = strategies.get_market_regime(btc_df)
+    logger.info(f'Market regime: {market_regime}')
+
     for internal, yf_ticker in cfg.CRYPTO_ASSETS.items():
         df = _fetch_yf(yf_ticker)
-        s  = _build_signal(df, internal, 'crypto', cfg, open_trades)
+        s  = _build_signal(df, internal, 'crypto', cfg, open_trades, market_regime)
         if s: signals.append(s)
 
     # ── Forex (London+NY) — HIGHEST PRIORITY ──────────────────────────────────
@@ -353,6 +358,11 @@ def scan_markets(cfg, open_trades=None):
 
 def get_current_prices(cfg):
     prices = {}
+    # Detect overall crypto market regime using BTC trend
+    btc_df = _fetch_yf('BTC-USD', period='30d', interval='1h', limit=200)
+    market_regime = strategies.get_market_regime(btc_df)
+    logger.info(f'Market regime: {market_regime}')
+
     for internal, yf_ticker in cfg.CRYPTO_ASSETS.items():
         df = _fetch_yf(yf_ticker, period='1d', interval='5m', limit=5)
         if df is not None and not df.empty:
