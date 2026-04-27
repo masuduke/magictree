@@ -222,7 +222,7 @@ def _build_signal(df, asset, asset_type, cfg, open_trades, market_regime="NEUTRA
 
     # Historical
     hist_wr = _historical_wr(df, direction, tp_pct, sl_pct)
-    if hist_wr < 45:
+    if hist_wr < 55:
         logger.info(f"History block: {asset} {direction} (WR {hist_wr}%)")
         return None
 
@@ -293,12 +293,12 @@ def scan_markets(cfg, open_trades=None):
 
     # ── Crypto (24/7) ─────────────────────────────────────────────────────────
     # Detect overall crypto market regime using BTC trend
-    btc_df = _fetch_yf('BTC-USD', period='30d', interval='1h', limit=200)
+    btc_df = _fetch_yf('BTC-USD', period='60d', interval='1d', limit=60)
     market_regime = strategies.get_market_regime(btc_df)
     logger.info(f'Market regime: {market_regime}')
 
     for internal, yf_ticker in cfg.CRYPTO_ASSETS.items():
-        df = _fetch_yf(yf_ticker)
+        df = _fetch_yf(yf_ticker, period='30d', interval='1h', limit=200)
         s  = _build_signal(df, internal, 'crypto', cfg, open_trades, market_regime)
         if s: signals.append(s)
 
@@ -359,7 +359,7 @@ def scan_markets(cfg, open_trades=None):
 def get_current_prices(cfg):
     prices = {}
     # Detect overall crypto market regime using BTC trend
-    btc_df = _fetch_yf('BTC-USD', period='30d', interval='1h', limit=200)
+    btc_df = _fetch_yf('BTC-USD', period='60d', interval='1d', limit=60)
     market_regime = strategies.get_market_regime(btc_df)
     logger.info(f'Market regime: {market_regime}')
 

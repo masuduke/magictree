@@ -74,28 +74,44 @@ def open_trade(signal: dict, capital: float, cfg) -> dict:
     risk_gbp  = round(capital * cfg.RISK_PER_TRADE_PCT, 2)
     amount  = risk_gbp * 10   # invest 10x risk amount (uses 1:10 leverage concept)
 
+    # Calculate leveraged profit/loss amounts
+    leverage        = signal.get('leverage', 1)
+    tp_pct          = signal.get('tp_pct', 0.01)
+    sl_pct          = signal.get('sl_pct', 0.005)
+    leveraged_pos   = capital * leverage
+    potential_profit = round(leveraged_pos * tp_pct, 2)
+    potential_loss   = round(leveraged_pos * sl_pct, 2)
+
     trade = {
-        'id':              datetime.utcnow().strftime('%Y%m%d%H%M%S'),
-        'asset':           signal['asset'],
-        'asset_type':      signal.get('asset_type', 'crypto'),
-        'direction':       signal['direction'],
-        'entry_price':     entry,
-        'take_profit':     tp,
-        'stop_loss':       sl,
-        'position_size':   pos_sz,
-        'risk_amount':     risk_gbp,
-        'potential_profit': risk_gbp,
-        'confidence':      signal['confidence'],
-        'entry_time':      signal['timestamp'],
-        'status':          'OPEN',
-        'paper':           cfg.PAPER_TRADE,
-        'broker':          'etoro',
-        'capital_before':  round(capital, 2),
-        'order_id':        None,
-        'exit_price':      None,
-        'exit_time':       None,
-        'pnl':             None,
-        'result':          None,
+        'id':               datetime.utcnow().strftime('%Y%m%d%H%M%S'),
+        'asset':            signal['asset'],
+        'asset_type':       signal.get('asset_type', 'crypto'),
+        'strategy':         signal.get('strategy', 'UNKNOWN'),
+        'direction':        signal['direction'],
+        'entry_price':      entry,
+        'take_profit':      tp,
+        'stop_loss':        sl,
+        'position_size':    pos_sz,
+        'risk_amount':      risk_gbp,
+        'potential_profit': potential_profit,
+        'potential_loss':   potential_loss,
+        'leverage':         leverage,
+        'tp_pct':           tp_pct,
+        'sl_pct':           sl_pct,
+        'confidence':       signal['confidence'],
+        'entry_time':       signal['timestamp'],
+        'status':           'OPEN',
+        'paper':            cfg.PAPER_TRADE,
+        'broker':           'etoro',
+        'capital_before':   round(capital, 2),
+        'max_hours':        signal.get('max_hours', 24),
+        'asset_label':      signal.get('asset_label', signal['asset']),
+        'asset_emoji':      signal.get('asset_emoji', ''),
+        'order_id':         None,
+        'exit_price':       None,
+        'exit_time':        None,
+        'pnl':              None,
+        'result':           None,
     }
 
     if cfg.PAPER_TRADE:
@@ -165,10 +181,33 @@ def check_and_close(open_trades: list, current_prices: dict, cfg) -> tuple:
         hit_sl = (t['direction'] == 'BUY'  and price <= t['stop_loss'])  or \
                  (t['direction'] == 'SELL' and price >= t['stop_loss'])
 
-        if hit_tp or hit_sl:
-            result = 'WIN' if hit_tp else 'LOSS'
-            pnl    = t['risk_amount'] if hit_tp else -t['risk_amount']
+        # Check time stop
+        max_hours  = t.get('max_hours', 24)
+        entry_time = datetime.fromisoformat(t['entry_time'])
+        hit_time   = datetime.utcnow() >= entry_time + timedelta(hours=max_hours)
 
+        if hit_tp or hit_sl or hit_time:
+            entry_price  = t['entry_price']
+            leverage     = t.get('leverage', 1)
+            capital      = t['capital_before']
+            leveraged_pos = capital * leverage
+
+            # Calculate actual PnL based on real price movement x leverage
+            if t['direction'] == 'BUY':
+                raw_pnl = (price - entry_price) / entry_price * leveraged_pos
+            else:
+                raw_pnl = (entry_price - price) / entry_price * leveraged_pos
+
+            if hit_tp:
+                result = 'WIN'
+                pnl    = round(max(raw_pnl, t.get('potential_profit', 0.01)), 2)
+            elif hit_sl:
+                result = 'LOSS'
+                pnl    = round(min(raw_pnl, -t.get('potential_loss', 0.01)), 2)
+            else:
+                result = 'WIN' if raw_pnl > 0 else 'LOSS' if raw_pnl < 0 else 'BREAKEVEN'
+                pnl    = round(raw_pnl, 2)
+                logger.info(f"Time stop: {t['asset']} after {max_hours}h | PnL: £{pnl:.2f}")
             # Close on eToro if live
             if not t.get('paper') and t.get('order_id') and cfg.ETORO_API_KEY:
                 _close_etoro_position(t['order_id'], cfg)
@@ -179,9 +218,9 @@ def check_and_close(open_trades: list, current_prices: dict, cfg) -> tuple:
                 'exit_price': round(price, 6),
                 'exit_time':  datetime.utcnow().isoformat(),
                 'pnl':        round(pnl, 2),
+                'pnl':        round(pnl, 2),
                 'pnl_pct':    round(pnl / t['capital_before'] * 100, 2),
                 'close_reason': 'TP' if hit_tp else 'SL' if hit_sl else 'TIME',
-            })
             closed.append(t)
             icon = '✅' if hit_tp else '❌'
             logger.info(f"{icon} Closed {t['asset']} | {result} | PnL:£{pnl:.2f}")

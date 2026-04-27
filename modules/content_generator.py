@@ -149,22 +149,39 @@ def _fallback_content(stats: dict, cfg) -> dict:
 
 
 def generate_signal_alert(signal: dict, cfg) -> str:
-    """Short text for Telegram notification when a signal fires."""
-    sym   = cfg.CURRENCY_SYMBOL
-    emoji = '🟢' if signal['direction'] == 'BUY' else '🔴'
-    mode  = 'PAPER' if cfg.PAPER_TRADE else 'LIVE'
+def generate_signal_alert(signal: dict, cfg) -> str:
+    """Telegram notification when signal fires - shows leverage & expected profit."""
+    sym     = cfg.CURRENCY_SYMBOL
+    action  = "BUY" if signal["direction"] == "BUY" else "SELL"
+    mode    = "PAPER" if cfg.PAPER_TRADE else "LIVE"
+    lev     = signal.get("leverage", 1)
+    exp_p   = signal.get("expected_profit", 0)
+    max_l   = signal.get("max_loss", 0)
+    strat   = signal.get("strategy", "SIGNAL")
+    label   = signal.get("asset_label", signal["asset"])
+    aemoji  = signal.get("asset_emoji", "")
+    max_h   = signal.get("max_hours", 24)
+    tp_pct  = signal.get("tp_pct", 0) * 100
+    sl_pct  = signal.get("sl_pct", 0) * 100
+    reasons = signal.get("strategy_reasons", [])
+    why     = " | ".join(reasons[:2]) if reasons else "Technical signal"
+    dir_arrow = "UP" if action == "BUY" else "DOWN"
 
     return (
-        f"{emoji} *{mode} SIGNAL* [{signal['confidence']}% confidence]\n\n"
-        f"*Asset:*  {signal['asset']}\n"
-        f"*Action:* {signal['direction']}\n"
-        f"*Entry:*  {signal['price']}\n"
-        f"*Target:* {signal['take_profit']}\n"
-        f"*Stop:*   {signal['stop_loss']}\n"
-        f"*RSI:*    {signal['rsi']}\n"
-        f"*Time:*   {signal['timestamp'][:19]} UTC"
+        f"[{mode}] SIGNAL - {signal['confidence']}% confidence\n\n"
+        f"{aemoji} {label}\n"
+        f"Direction: {action} {dir_arrow}\n"
+        f"Strategy:  {strat}\n"
+        f"Entry:     {signal['price']}\n"
+        f"Target:    {signal['take_profit']} (+{tp_pct:.2f}%)\n"
+        f"Stop:      {signal['stop_loss']} (-{sl_pct:.2f}%)\n"
+        f"Leverage:  {lev}x\n"
+        f"If WIN:    +{sym}{exp_p:.2f}\n"
+        f"If LOSS:   -{sym}{max_l:.2f}\n"
+        f"Max hold:  {max_h}h\n"
+        f"Why:       {why}\n"
+        f"Time:      {signal['timestamp'][:19]} UTC"
     )
-
 
 def generate_trade_closed_alert(trade: dict, balance: float, cfg) -> str:
     sym   = cfg.CURRENCY_SYMBOL
