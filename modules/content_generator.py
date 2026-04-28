@@ -149,7 +149,6 @@ def _fallback_content(stats: dict, cfg) -> dict:
 
 
 def generate_signal_alert(signal: dict, cfg) -> str:
-def generate_signal_alert(signal: dict, cfg) -> str:
     """Telegram notification when signal fires - shows leverage & expected profit."""
     sym     = cfg.CURRENCY_SYMBOL
     action  = "BUY" if signal["direction"] == "BUY" else "SELL"
