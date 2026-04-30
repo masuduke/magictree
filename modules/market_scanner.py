@@ -331,7 +331,7 @@ def _build_signal(df, asset, asset_type, cfg):
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def scan_markets(cfg):
+def scan_markets(cfg, open_trades=None):
     signals = []
 
     for symbol in cfg.CRYPTO_ASSETS:
