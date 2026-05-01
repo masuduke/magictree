@@ -1,11 +1,17 @@
 """
-content_generator.py
---------------------
-Uses Anthropic API to generate:
-  - Video script (voiceover for the Reel)
-  - Instagram caption + hashtags
-  - YouTube title + description
-  - TikTok caption
+content_generator.py v2 - Comprehensive Rewrite
+------------------------------------------------
+Generates Telegram alerts and daily social media content.
+
+Fixes from v1:
+  - Replaced 'cfg.CURRENCY_SYMBOL' (corrupted 'A£') with literal 'GBP'
+  - Replaced corrupted UTF-8 emoji bytes with plain ASCII tags ([WIN]/[LOSS]/etc)
+  - Removed Markdown asterisks (notifier is now plain-text by default)
+  - Fixed signal dict key names: 'expected_loss' (was 'max_loss')
+                                 removed 'strategy_reasons' (doesn't exist)
+                                 use 'ai_reasoning' for the 'why' line
+  - Cleaned up Instagram captions to remove garbled emoji bytes
+  - Added defensive .get() for every dict access (no KeyErrors on edge cases)
 """
 import logging
 import anthropic
@@ -15,66 +21,144 @@ logger = logging.getLogger(__name__)
 
 def _call_claude(prompt: str, api_key: str, max_tokens: int = 1000) -> str:
     client = anthropic.Anthropic(api_key=api_key)
-    msg    = client.messages.create(
-        model      = "claude-sonnet-4-20250514",
-        max_tokens = max_tokens,
-        messages   = [{"role": "user", "content": prompt}]
+    msg = client.messages.create(
+        model='claude-sonnet-4-20250514',
+        max_tokens=max_tokens,
+        messages=[{'role': 'user', 'content': prompt}],
     )
     return msg.content[0].text
 
 
+# -- Telegram alerts ----------------------------------------------------------
+
+def generate_signal_alert(signal: dict, cfg) -> str:
+    """Telegram message when a signal fires (a trade is about to open)."""
+    action = signal.get('direction', 'BUY')
+    mode   = 'PAPER' if cfg.PAPER_TRADE else 'LIVE'
+
+    label    = signal.get('asset_label', signal.get('asset', '?'))
+    asset    = signal.get('asset', '?')
+    strategy = signal.get('strategy', 'EMA_TREND')
+    lev      = signal.get('leverage', 1)
+    price    = signal.get('price', 0)
+    tp       = signal.get('take_profit', 0)
+    sl       = signal.get('stop_loss', 0)
+    tp_pct   = signal.get('tp_pct', 0) * 100
+    sl_pct   = signal.get('sl_pct', 0) * 100
+    max_h    = signal.get('max_hours', 24)
+    conf     = signal.get('confidence', 0)
+    exp_p    = signal.get('expected_profit', 0)
+    exp_l    = signal.get('expected_loss', 0)
+    regime   = signal.get('regime', 'neutral')
+    why      = signal.get('ai_reasoning', 'Technical signal aligned with regime')
+
+    arrow = 'UP' if action == 'BUY' else 'DOWN'
+
+    return (
+        f"[{mode}] SIGNAL - {conf}% confidence\n\n"
+        f"Asset:     {label} ({asset})\n"
+        f"Direction: {action} {arrow}\n"
+        f"Strategy:  {strategy}\n"
+        f"Regime:    {regime}\n"
+        f"Entry:     {price}\n"
+        f"Target:    {tp} (+{tp_pct:.2f}%)\n"
+        f"Stop:      {sl} (-{sl_pct:.2f}%)\n"
+        f"Leverage:  {lev}x\n"
+        f"If WIN:    +GBP{exp_p:.2f}\n"
+        f"If LOSS:   -GBP{exp_l:.2f}\n"
+        f"Max hold:  {max_h}h\n"
+        f"Why:       {why}\n"
+        f"Time:      {signal.get('timestamp', '')[:19]} UTC"
+    )
+
+
+def generate_trade_closed_alert(trade: dict, balance: float, cfg) -> str:
+    """Telegram message when a trade closes (TP / SL / TIME)."""
+    result = trade.get('result', 'BREAKEVEN')
+    tag    = '[WIN]' if result == 'WIN' else '[LOSS]' if result == 'LOSS' else '[EVEN]'
+    mode   = 'PAPER' if trade.get('paper') else 'LIVE'
+
+    asset     = trade.get('asset', '?')
+    direction = trade.get('direction', '?')
+    entry     = trade.get('entry_price', 0)
+    exit_p    = trade.get('exit_price', 0)
+    pnl       = trade.get('pnl', 0)
+    reason    = trade.get('close_reason', '?')
+    leverage  = trade.get('leverage', 1)
+    capital   = trade.get('capital_before', 0)
+    pnl_pct   = trade.get('pnl_pct', 0)
+
+    return (
+        f"{tag} {mode} TRADE CLOSED\n\n"
+        f"Asset:     {asset}\n"
+        f"Direction: {direction}\n"
+        f"Entry:     {entry}\n"
+        f"Exit:      {exit_p}\n"
+        f"Reason:    {reason}\n"
+        f"Leverage:  {leverage}x on GBP{capital:.2f}\n"
+        f"PnL:       GBP{pnl:+.2f} ({pnl_pct:+.2f}%)\n"
+        f"Balance:   GBP{balance:.2f}"
+    )
+
+
+# -- Social media daily content ----------------------------------------------
+
 def generate_daily_content(stats: dict, recent_signal: dict | None, cfg) -> dict:
-    """
-    Generates all content for the daily post.
-    Returns dict with: script, ig_caption, yt_title, yt_description, tiktok_caption
-    """
-    balance     = stats['balance']
-    initial     = stats['initial']
-    pnl         = stats['total_pnl']
-    win_rate    = stats['win_rate']
-    total       = stats['total_trades']
-    days        = stats['days_active']
-    sym         = cfg.CURRENCY_SYMBOL
-    pnl_sign    = '+' if pnl >= 0 else ''
-    emoji_trend = '📈' if pnl >= 0 else '📉'
+    """Generates the daily post bundle: video script, IG, YT, TikTok captions."""
+    balance  = stats.get('balance', 0)
+    initial  = stats.get('initial', 500)
+    pnl      = stats.get('total_pnl', 0)
+    win_rate = stats.get('win_rate', 0)
+    total    = stats.get('total_trades', 0)
+    days     = stats.get('days_active', 0)
+    pnl_sign = '+' if pnl >= 0 else ''
 
     recent_txt = ''
-    if stats.get('recent_trades'):
+    recent_trades = stats.get('recent_trades', [])
+    if recent_trades:
         lines = []
-        for t in stats['recent_trades'][-3:]:
-            icon = '✅' if t['result'] == 'WIN' else '❌'
-            lines.append(f"  {icon} {t['asset']} {t['direction']} → {sym}{t['pnl']:+.2f}")
+        for t in recent_trades[-3:]:
+            tag = '[WIN]' if t.get('result') == 'WIN' else '[LOSS]'
+            asset = t.get('asset', '?')
+            tdir  = t.get('direction', '?')
+            tpnl  = t.get('pnl', 0)
+            lines.append(f"  {tag} {asset} {tdir} -> GBP{tpnl:+.2f}")
         recent_txt = '\n'.join(lines)
 
     signal_txt = ''
     if recent_signal:
-        signal_txt = (f"Today's signal: {recent_signal['direction']} {recent_signal['asset']} "
-                      f"@ {recent_signal['price']} | Confidence {recent_signal['confidence']}%")
+        sa  = recent_signal.get('asset', '?')
+        sd  = recent_signal.get('direction', '?')
+        sp  = recent_signal.get('price', 0)
+        sc  = recent_signal.get('confidence', 0)
+        signal_txt = f"Today's signal: {sd} {sa} @ {sp} | Confidence {sc}%"
 
-    prompt = f"""You are the voice behind a viral Instagram/YouTube finance channel called "{cfg.CHANNEL_NAME}".
-The creator started with {sym}{initial:.0f} and is documenting their trading journey publicly.
+    channel_name = getattr(cfg, 'CHANNEL_NAME', 'Trading Challenge')
+
+    prompt = f"""You are the voice behind a viral Instagram/YouTube finance channel called "{channel_name}".
+The creator started with GBP{initial:.0f} and is documenting their trading journey publicly.
 Today is Day {days} of the challenge.
 
 STATS:
-• Balance: {sym}{balance:.2f}
-• P&L:     {pnl_sign}{sym}{pnl:.2f}
-• Trades:  {total} total | Win rate: {win_rate}%
+- Balance: GBP{balance:.2f}
+- P&L:     {pnl_sign}GBP{pnl:.2f}
+- Trades:  {total} total | Win rate: {win_rate}%
 {signal_txt}
 
 Recent trades:
 {recent_txt if recent_txt else '  No trades yet today.'}
 
-Generate the following — keep it authentic, conversational, and engaging:
+Generate the following - keep it authentic, conversational, and engaging:
 
 1. VIDEO SCRIPT (30 seconds spoken, energetic, real, use "I" not "we"):
 Write a voiceover script that hooks in 3 seconds, shows the numbers honestly, and ends with a CTA to follow.
 
-2. INSTAGRAM CAPTION (max 150 words, with line breaks for readability):
-Start with a hook line. Include key numbers. End with a question to drive comments. Add 15–20 relevant hashtags on a new line.
+2. INSTAGRAM CAPTION (max 150 words, with line breaks):
+Start with a hook line. Include key numbers. End with a question to drive comments. Add 15-20 relevant hashtags on a new line.
 
-3. YOUTUBE TITLE (max 60 chars, include {sym} amount, clickable):
+3. YOUTUBE TITLE (max 60 chars, include GBP amount, clickable):
 
-4. YOUTUBE DESCRIPTION (200 words max, include timestamps placeholder, links placeholder):
+4. YOUTUBE DESCRIPTION (200 words max, timestamps placeholder, links placeholder):
 
 5. TIKTOK CAPTION (max 80 chars + 5 hashtags):
 
@@ -92,25 +176,28 @@ Format your response EXACTLY like this:
 """
 
     try:
-        raw = _call_claude(prompt, cfg.ANTHROPIC_API_KEY, max_tokens=1200)
-        return _parse_content(raw, stats, cfg)
+        api_key = getattr(cfg, 'ANTHROPIC_API_KEY', '')
+        if not api_key:
+            logger.warning("No ANTHROPIC_API_KEY - using fallback content")
+            return _fallback_content(stats, cfg)
+        raw = _call_claude(prompt, api_key, max_tokens=1200)
+        return _parse_content(raw)
     except Exception as exc:
         logger.error(f"Content generation failed: {exc}")
         return _fallback_content(stats, cfg)
 
 
-def _parse_content(raw: str, stats: dict, cfg) -> dict:
-    sections = {
-        'script':          _extract(raw, '---SCRIPT---',     '---IG_CAPTION---'),
-        'ig_caption':      _extract(raw, '---IG_CAPTION---', '---YT_TITLE---'),
-        'yt_title':        _extract(raw, '---YT_TITLE---',   '---YT_DESC---'),
-        'yt_description':  _extract(raw, '---YT_DESC---',    '---TIKTOK---'),
-        'tiktok_caption':  _extract(raw, '---TIKTOK---',     None),
+def _parse_content(raw: str) -> dict:
+    return {
+        'script':         _extract(raw, '---SCRIPT---',     '---IG_CAPTION---'),
+        'ig_caption':     _extract(raw, '---IG_CAPTION---', '---YT_TITLE---'),
+        'yt_title':       _extract(raw, '---YT_TITLE---',   '---YT_DESC---'),
+        'yt_description': _extract(raw, '---YT_DESC---',    '---TIKTOK---'),
+        'tiktok_caption': _extract(raw, '---TIKTOK---',     None),
     }
-    return sections
 
 
-def _extract(text: str, start_marker: str, end_marker: str | None) -> str:
+def _extract(text: str, start_marker: str, end_marker) -> str:
     try:
         start = text.index(start_marker) + len(start_marker)
         if end_marker:
@@ -122,78 +209,41 @@ def _extract(text: str, start_marker: str, end_marker: str | None) -> str:
 
 
 def _fallback_content(stats: dict, cfg) -> dict:
-    sym = cfg.CURRENCY_SYMBOL
-    b   = stats['balance']
-    p   = stats['total_pnl']
-    d   = stats['days_active']
+    """Used when Claude API call fails - basic templated content."""
+    b = stats.get('balance', 0)
+    p = stats.get('total_pnl', 0)
+    d = stats.get('days_active', 0)
+    initial = stats.get('initial', 500)
+    win_rate = stats.get('win_rate', 0)
     sign = '+' if p >= 0 else ''
 
+    channel_name   = getattr(cfg, 'CHANNEL_NAME',   'Trading Challenge')
+    channel_handle = getattr(cfg, 'CHANNEL_HANDLE', '@channel')
+
     return {
-        'script':         f"Day {d} of the {sym}{stats['initial']:.0f} trading challenge. "
-                          f"Balance is now {sym}{b:.2f}, that's {sign}{sym}{p:.2f}. "
-                          f"Fully automated system doing all the work. Follow to watch it live.",
-        'ig_caption':     f"Day {d} update 📊\n\nBalance: {sym}{b:.2f}\nP&L: {sign}{sym}{p:.2f}\n"
-                          f"Win rate: {stats['win_rate']}%\n\n"
-                          f"AI bot trading on my behalf 24/7 🤖\n\n"
-                          f"Would you trust an AI with {sym}500? 👇\n\n"
-                          f"#trading #crypto #gold #investing #forex #tradingbot #ai "
-                          f"#makemoneyonline #passiveincome #ukfinance #stockmarket",
-        'yt_title':       f"Day {d}: {sym}{b:.2f} | {cfg.CHANNEL_NAME}",
-        'yt_description': f"Day {d} of the {sym}{stats['initial']:.0f} AI Trading Challenge.\n\n"
-                          f"Starting balance: {sym}{stats['initial']:.0f}\n"
-                          f"Current balance: {sym}{b:.2f}\n"
-                          f"Total P&L: {sign}{sym}{p:.2f}\n\n"
-                          f"Follow the full journey on Instagram: {cfg.CHANNEL_HANDLE}",
-        'tiktok_caption': f"Day {d} AI trading update: {sym}{b:.2f} #trading #crypto #ai #money",
+        'script': (
+            f"Day {d} of the GBP{initial:.0f} trading challenge. "
+            f"Balance is now GBP{b:.2f}, that is {sign}GBP{p:.2f} change. "
+            f"Fully automated AI system doing all the work. Follow to watch it live."
+        ),
+        'ig_caption': (
+            f"Day {d} update.\n\n"
+            f"Balance: GBP{b:.2f}\n"
+            f"P&L: {sign}GBP{p:.2f}\n"
+            f"Win rate: {win_rate}%\n\n"
+            f"AI bot trading on my behalf 24/7.\n\n"
+            f"Would you trust an AI with GBP500?\n\n"
+            f"#trading #crypto #gold #investing #forex #tradingbot #ai "
+            f"#makemoneyonline #passiveincome #ukfinance #stockmarket"
+        ),
+        'yt_title': f"Day {d}: GBP{b:.2f} | {channel_name}",
+        'yt_description': (
+            f"Day {d} of the GBP{initial:.0f} AI Trading Challenge.\n\n"
+            f"Starting balance: GBP{initial:.0f}\n"
+            f"Current balance: GBP{b:.2f}\n"
+            f"Total P&L: {sign}GBP{p:.2f}\n"
+            f"Win rate: {win_rate}%\n\n"
+            f"Follow the full journey on Instagram: {channel_handle}"
+        ),
+        'tiktok_caption': f"Day {d} AI trading update: GBP{b:.2f} #trading #crypto #ai #money",
     }
-
-
-def generate_signal_alert(signal: dict, cfg) -> str:
-    """Telegram notification when signal fires - shows leverage & expected profit."""
-    sym     = cfg.CURRENCY_SYMBOL
-    action  = "BUY" if signal["direction"] == "BUY" else "SELL"
-    mode    = "PAPER" if cfg.PAPER_TRADE else "LIVE"
-    lev     = signal.get("leverage", 1)
-    exp_p   = signal.get("expected_profit", 0)
-    max_l   = signal.get("max_loss", 0)
-    strat   = signal.get("strategy", "SIGNAL")
-    label   = signal.get("asset_label", signal["asset"])
-    aemoji  = signal.get("asset_emoji", "")
-    max_h   = signal.get("max_hours", 24)
-    tp_pct  = signal.get("tp_pct", 0) * 100
-    sl_pct  = signal.get("sl_pct", 0) * 100
-    reasons = signal.get("strategy_reasons", [])
-    why     = " | ".join(reasons[:2]) if reasons else "Technical signal"
-    dir_arrow = "UP" if action == "BUY" else "DOWN"
-
-    return (
-        f"[{mode}] SIGNAL - {signal['confidence']}% confidence\n\n"
-        f"{aemoji} {label}\n"
-        f"Direction: {action} {dir_arrow}\n"
-        f"Strategy:  {strat}\n"
-        f"Entry:     {signal['price']}\n"
-        f"Target:    {signal['take_profit']} (+{tp_pct:.2f}%)\n"
-        f"Stop:      {signal['stop_loss']} (-{sl_pct:.2f}%)\n"
-        f"Leverage:  {lev}x\n"
-        f"If WIN:    +{sym}{exp_p:.2f}\n"
-        f"If LOSS:   -{sym}{max_l:.2f}\n"
-        f"Max hold:  {max_h}h\n"
-        f"Why:       {why}\n"
-        f"Time:      {signal['timestamp'][:19]} UTC"
-    )
-
-def generate_trade_closed_alert(trade: dict, balance: float, cfg) -> str:
-    sym   = cfg.CURRENCY_SYMBOL
-    icon  = '✅ WIN' if trade['result'] == 'WIN' else '❌ LOSS'
-    pnl   = trade['pnl']
-    mode  = 'PAPER' if trade.get('paper') else 'LIVE'
-
-    return (
-        f"{icon} *{mode} TRADE CLOSED*\n\n"
-        f"*Asset:*   {trade['asset']}\n"
-        f"*Direction:* {trade['direction']}\n"
-        f"*Entry:*   {trade['entry_price']}\n"
-        f"*Exit:*    {trade['exit_price']}\n"
-        f"*P&L:*     {sym}{pnl:+.2f}\n"
-        f"*Balance:* {sym}{balance:.2f}"
-    )
