@@ -262,8 +262,10 @@ def _historical_score(df, direction, tp_pct=0.02, sl_pct=0.01):
         r      = float(rsi_s.iloc[i])
         p      = float(close.iloc[i])
 
-        setup_buy  = direction == 'BUY'  and pf <= ps and cf > cs and 45 <= r <= 55
-        setup_sell = direction == 'SELL' and pf >= ps and cf < cs and 45 <= r <= 55
+        # FIX 9: widened RSI band 45-55 -> 40-60 for more historical samples
+        # Old narrow band found 0-2 setups per asset, blocking all signals
+        setup_buy  = direction == 'BUY'  and pf <= ps and cf > cs and 40 <= r <= 60
+        setup_sell = direction == 'SELL' and pf >= ps and cf < cs and 40 <= r <= 60
 
         if setup_buy or setup_sell:
             tp = p * (1 + tp_pct) if setup_buy else p * (1 - tp_pct)
@@ -326,7 +328,7 @@ REJECT IMMEDIATELY if any of these are true:
 - News sentiment opposes direction
 - Technical score below 65
 - Market regime opposes direction (bull regime + SELL, or bear regime + BUY)
-- RSI outside 45-55
+- RSI outside 40-60
 
 Only APPROVE if ALL of these are true:
 - sample_size >= 10 AND win_rate >= 58%
