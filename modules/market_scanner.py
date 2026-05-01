@@ -1,18 +1,21 @@
 """
-market_scanner.py  (v4 - Risk-First Rewrite)
---------------------------------------------
-All 8 fixes applied:
-  1. Per-asset SL/TP from asset_config.py (no more flat globals)
-  2. Risk-first AI prompt
-  3. BTC regime detection (300d daily data)
-  4. Forex regime filter
-  5. Stock regime filter
-  6. Volume skip for forex (fake data)
-  7. Min 10 historical setups required
-  8. Forex session hours (08-21 UTC)
+market_scanner.py v5 - Comprehensive Rewrite
+---------------------------------------------
+Fixes from v4:
+  - Crypto fetch: yfinance instead of ccxt.binance (binance IP-banned on Render)
+  - ETFs are now scanned (were dead config)
+  - Signal dict now contains EVERY key the executor needs:
+        leverage, tp_pct, sl_pct, max_hours, strategy, asset_label, asset_emoji
+  - get_current_prices() keys results by SAME asset name the trade uses
+        (was a mess: stocks stored under 'NVDA' but priced under 'Nvidia')
+  - Forex regime filter handles base/quote direction (DXY-bear allows BUY GBP/USD)
+  - Per-asset SL/TP from asset_config (not flat globals)
+  - Risk-first AI prompt + min 10 historical setups
+  - Per-asset diagnostic logging when no signal fires
 """
 import logging
 import json
+import re
 import requests
 import pandas as pd
 from datetime import datetime
@@ -30,7 +33,6 @@ BULLISH_KEYWORDS = [
     'partnership', 'record', 'high', 'growth', 'buy', 'accumulate',
     'institutional', 'etf', 'approval', 'positive', 'profit', 'gain'
 ]
-
 BEARISH_KEYWORDS = [
     'crash', 'collapse', 'ban', 'hack', 'fraud', 'lawsuit', 'recession',
     'inflation', 'rate hike', 'selloff', 'plunge', 'tumble', 'warning',
@@ -62,7 +64,6 @@ def _is_stock_hours():
 
 def _is_forex_hours():
     now = datetime.utcnow()
-    # Forex: Mon-Fri, 08-21 UTC (London + NY overlap coverage)
     return now.weekday() < 5 and FOREX_OPEN_HOUR <= now.hour <= FOREX_CLOSE_HOUR
 
 
@@ -70,10 +71,10 @@ def _is_forex_asset(asset):
     return '/' in asset and 'USDT' not in asset and '/USDT' not in asset
 
 
-# -- FIX 3/4/5: Market regime detection ---------------------------------------
+# -- Regime detection ---------------------------------------------------------
 
 def _compute_regime(df):
-    """Return 'bull', 'bear', or 'neutral' based on 50/200 EMA cross."""
+    """Return 'bull', 'bear', or 'neutral' based on 50/200 EMA + price."""
     if df is None or len(df) < 210:
         return 'neutral'
     close = df['close'].astype(float)
@@ -100,7 +101,7 @@ def get_crypto_regime():
 def get_forex_regime():
     if 'forex' in _regime_cache:
         return _regime_cache['forex']
-    df = _fetch_daily_yf('DX-Y.NYB', period='400d')  # DXY proxy
+    df = _fetch_daily_yf('DX-Y.NYB', period='400d')
     regime = _compute_regime(df)
     _regime_cache['forex'] = regime
     logger.info(f"Forex regime (DXY daily): {regime}")
@@ -119,62 +120,38 @@ def get_stock_regime():
 
 def _regime_allows(direction, regime, asset=None, asset_type=None):
     """Reject counter-trend trades.
-
-    For crypto/stocks/commodities: regime tracks the asset class itself
-        (BTC for crypto, SPY for stocks). Bull = only BUY, bear = only SELL.
-
-    For forex: regime tracks DXY (USD strength), NOT the pair itself.
-        DXY bull = USD strong:
-            XXX/USD (e.g. GBP/USD): bullish on pair = USD weak -> BLOCK BUY, allow SELL
-            USD/XXX (e.g. USD/JPY): bullish on pair = USD strong -> allow BUY, BLOCK SELL
-        DXY bear = USD weak:
-            XXX/USD: allow BUY (selling weak USD), BLOCK SELL
-            USD/XXX: BLOCK BUY (buying weak USD), allow SELL
+    Forex: regime tracks DXY (USD strength). Pair direction depends on whether
+    USD is base or quote. Crypto/stocks/commodities: regime tracks the asset itself.
     """
     if regime == 'neutral':
         return True
 
-    # Forex: USD is on one side of the pair, regime is DXY (USD strength)
     if asset_type == 'forex' and asset and '/' in asset:
         base, quote = asset.split('/', 1)
-        usd_is_quote = (quote.upper() == 'USD')   # e.g. GBP/USD -> USD is quote
-        usd_is_base  = (base.upper() == 'USD')    # e.g. USD/JPY -> USD is base
+        usd_is_quote = (quote.upper() == 'USD')
+        usd_is_base  = (base.upper() == 'USD')
 
         if usd_is_quote:
-            # Pair goes UP when USD goes DOWN
-            # DXY bull (USD up)  -> pair down -> only SELL
-            # DXY bear (USD down) -> pair up   -> only BUY
-            if regime == 'bull' and direction == 'BUY':
-                return False
-            if regime == 'bear' and direction == 'SELL':
-                return False
+            # XXX/USD: pair UP when USD DOWN
+            if regime == 'bull' and direction == 'BUY':  return False
+            if regime == 'bear' and direction == 'SELL': return False
             return True
-
         if usd_is_base:
-            # Pair goes UP when USD goes UP
-            # DXY bull (USD up)  -> pair up   -> only BUY
-            # DXY bear (USD down) -> pair down -> only SELL
-            if regime == 'bull' and direction == 'SELL':
-                return False
-            if regime == 'bear' and direction == 'BUY':
-                return False
+            # USD/XXX: pair UP when USD UP
+            if regime == 'bull' and direction == 'SELL': return False
+            if regime == 'bear' and direction == 'BUY':  return False
             return True
+        return True  # Cross pair, no USD - allow either
 
-        # Cross pair (no USD) - DXY regime doesn't apply, allow either direction
-        return True
-
-    # Crypto/stocks/commodities: regime tracks the asset class directly
-    if regime == 'bull' and direction == 'SELL':
-        return False
-    if regime == 'bear' and direction == 'BUY':
-        return False
+    # Crypto / stocks / commodities
+    if regime == 'bull' and direction == 'SELL': return False
+    if regime == 'bear' and direction == 'BUY':  return False
     return True
 
 
-# -- FIX 6: Volume ratio (skips forex) ----------------------------------------
+# -- Volume (skips forex) -----------------------------------------------------
 
 def _volume_ratio(df, asset):
-    """Return vol/avg_vol or 1.0 for forex (fake volume data)."""
     if _is_forex_asset(asset):
         return 1.0
     if df is None or 'vol' not in df.columns or len(df) < 21:
@@ -191,7 +168,7 @@ def _volume_ratio(df, asset):
 
 def _technical_score(df, asset, ema_f, ema_s, rsi_lo, rsi_hi):
     if df is None or len(df) < ema_s + 30:
-        return {'score': 0, 'direction': None}
+        return {'score': 0, 'direction': None, 'diag': None}
 
     close = df['close'].astype(float)
     ef    = _ema(close, ema_f)
@@ -201,23 +178,24 @@ def _technical_score(df, asset, ema_f, ema_s, rsi_lo, rsi_hi):
 
     cf, pf   = ef.iloc[-1], ef.iloc[-2]
     cs, ps   = es.iloc[-1], es.iloc[-2]
-    cur_rsi  = rsi.iloc[-1]
+    cur_rsi  = float(rsi.iloc[-1])
     price    = float(close.iloc[-1])
-    e50_val  = e50.iloc[-1]
+    e50_val  = float(e50.iloc[-1])
     ema_sep  = abs(cf - cs) / cs * 100
 
     vol_ratio = _volume_ratio(df, asset)
     vol_ok    = vol_ratio > 0.8
 
-    cross_up   = pf <= ps and cf > cs
-    cross_down = pf >= ps and cf < cs
-    rsi_ok     = rsi_lo <= cur_rsi <= rsi_hi
+    cross_up   = bool(pf <= ps and cf > cs)
+    cross_down = bool(pf >= ps and cf < cs)
+    rsi_ok     = bool(rsi_lo <= cur_rsi <= rsi_hi)
+    above_50   = bool(price > e50_val)
 
     direction = None
     score     = 0
     reasons   = []
 
-    if cross_up and rsi_ok and price > e50_val:
+    if cross_up and rsi_ok and above_50:
         direction = 'BUY'
         score += 40; reasons.append('EMA bullish crossover')
         score += 20; reasons.append(f'RSI {cur_rsi:.1f} in range')
@@ -226,8 +204,7 @@ def _technical_score(df, asset, ema_f, ema_s, rsi_lo, rsi_hi):
             score += 15; reasons.append(f'Volume {vol_ratio:.2f}x')
         if ema_sep > 0.3:
             score += 5; reasons.append(f'EMA sep {ema_sep:.2f}%')
-
-    elif cross_down and rsi_ok and price < e50_val:
+    elif cross_down and rsi_ok and not above_50:
         direction = 'SELL'
         score += 40; reasons.append('EMA bearish crossover')
         score += 20; reasons.append(f'RSI {cur_rsi:.1f} in range')
@@ -237,12 +214,11 @@ def _technical_score(df, asset, ema_f, ema_s, rsi_lo, rsi_hi):
         if ema_sep > 0.3:
             score += 5; reasons.append(f'EMA sep {ema_sep:.2f}%')
 
-    # FIX 11: capture diagnostic info for visibility when no direction fires
     diag = {
         'cross_up':   cross_up,
         'cross_down': cross_down,
         'rsi_ok':     rsi_ok,
-        'above_50':   price > e50_val,
+        'above_50':   above_50,
     }
 
     return {
@@ -262,10 +238,10 @@ def _fetch_news(asset, asset_type):
     headlines = []
     try:
         ticker = asset.split('/')[0] if '/' in asset else asset
-        url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
-        r   = requests.get(url, timeout=8)
+        url = (f"https://feeds.finance.yahoo.com/rss/2.0/headline"
+               f"?s={ticker}&region=US&lang=en-US")
+        r = requests.get(url, timeout=8)
         if r.ok:
-            import re
             titles = re.findall(r'<title><!\[CDATA\[(.*?)\]\]></title>', r.text)
             if not titles:
                 titles = re.findall(r'<title>(.*?)</title>', r.text)
@@ -283,8 +259,8 @@ def _sentiment_score(headlines, direction):
     bull = sum(text.count(kw) for kw in BULLISH_KEYWORDS)
     bear = sum(text.count(kw) for kw in BEARISH_KEYWORDS)
     total = bull + bear
-    raw   = (bull / total * 100) if total > 0 else 50
-    sent  = 'bullish' if raw > 60 else 'bearish' if raw < 40 else 'neutral'
+    raw = (bull / total * 100) if total > 0 else 50
+    sent = 'bullish' if raw > 60 else 'bearish' if raw < 40 else 'neutral'
     score = raw if direction == 'BUY' else (100 - raw)
     return {
         'score':      round(score, 1),
@@ -295,7 +271,7 @@ def _sentiment_score(headlines, direction):
     }
 
 
-# -- LAYER 3: Historical Backtest (FIX 7: min 10 setups) ----------------------
+# -- LAYER 3: Historical Backtest --------------------------------------------
 
 def _historical_score(df, direction, tp_pct=0.02, sl_pct=0.01):
     if df is None or len(df) < 100:
@@ -314,8 +290,7 @@ def _historical_score(df, direction, tp_pct=0.02, sl_pct=0.01):
         r      = float(rsi_s.iloc[i])
         p      = float(close.iloc[i])
 
-        # FIX 9: widened RSI band 45-55 -> 40-60 for more historical samples
-        # Old narrow band found 0-2 setups per asset, blocking all signals
+        # Wider band 40-60 to produce enough samples
         setup_buy  = direction == 'BUY'  and pf <= ps and cf > cs and 40 <= r <= 60
         setup_sell = direction == 'SELL' and pf >= ps and cf < cs and 40 <= r <= 60
 
@@ -332,7 +307,6 @@ def _historical_score(df, direction, tp_pct=0.02, sl_pct=0.01):
                     total += 1
                     break
 
-    # FIX 7: require minimum 10 setups or return neutral
     if total < 10:
         return {'score': 50, 'win_rate': 50, 'sample_size': total}
 
@@ -340,7 +314,7 @@ def _historical_score(df, direction, tp_pct=0.02, sl_pct=0.01):
     return {'score': win_rate, 'win_rate': win_rate, 'sample_size': total}
 
 
-# -- LAYER 4: Claude AI Decision (FIX 2: risk-first prompt) -------------------
+# -- LAYER 4: Claude AI Decision ---------------------------------------------
 
 def _ai_decision(asset, direction, price, tech, sentiment, historical, regime, api_key):
     if not api_key:
@@ -395,7 +369,7 @@ Respond ONLY in valid JSON:
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
-        msg    = client.messages.create(
+        msg = client.messages.create(
             model='claude-sonnet-4-20250514',
             max_tokens=200,
             messages=[{'role': 'user', 'content': prompt}]
@@ -406,7 +380,6 @@ Respond ONLY in valid JSON:
         return json.loads(raw)
     except Exception as e:
         logger.error(f"AI decision error: {e}")
-        # Risk-first fallback: reject on error
         return {'approved': False, 'confidence': 0,
                 'reasoning': f'AI error - rejected for safety ({e})',
                 'key_risk': 'Unknown', 'expected_outcome': 'UNCERTAIN'}
@@ -415,7 +388,7 @@ Respond ONLY in valid JSON:
 # -- Signal builder -----------------------------------------------------------
 
 def _build_signal(df, asset, asset_type, cfg):
-    # Regime filter (FIX 3/4/5)
+    # Regime by asset class
     if asset_type == 'crypto':
         regime = get_crypto_regime()
     elif asset_type == 'forex':
@@ -428,40 +401,46 @@ def _build_signal(df, asset, asset_type, cfg):
     tech = _technical_score(df, asset, cfg.EMA_FAST, cfg.EMA_SLOW,
                             cfg.RSI_LOWER_BAND, cfg.RSI_UPPER_BAND)
 
-    # FIX 11: diagnostic logging - so we see why each asset didn't produce a signal
+    # Diagnostic: log why no signal fired
     if not tech.get('direction'):
-        d = tech.get('diag', {})
+        d = tech.get('diag') or {}
         if d:
             cross = 'up' if d.get('cross_up') else 'down' if d.get('cross_down') else 'none'
-            reason_bits = []
+            bits = []
             if cross == 'none':
-                reason_bits.append('no EMA cross')
+                bits.append('no EMA cross')
             else:
-                reason_bits.append(f'cross={cross}')
+                bits.append(f'cross={cross}')
                 if not d.get('rsi_ok'):
-                    reason_bits.append(f'RSI {tech.get("rsi")} out of band')
+                    bits.append(f'RSI {tech.get("rsi")} out of band')
                 if cross == 'up' and not d.get('above_50'):
-                    reason_bits.append('price below 50EMA')
+                    bits.append('price below 50EMA')
                 if cross == 'down' and d.get('above_50'):
-                    reason_bits.append('price above 50EMA')
+                    bits.append('price above 50EMA')
             logger.info(f"  [{asset}] no signal - RSI {tech.get('rsi')}, "
-                        f"EMA sep {tech.get('ema_sep')}% | {', '.join(reason_bits)}")
+                        f"sep {tech.get('ema_sep')}% | {', '.join(bits)}")
         return None
+
     if tech['score'] < 40:
-        logger.info(f"  [{asset}] weak signal - score {tech['score']} < 40, RSI {tech.get('rsi')}")
+        logger.info(f"  [{asset}] weak signal - score {tech['score']} < 40")
         return None
 
     direction = tech['direction']
     price     = tech['price']
 
-    # Regime check (FIX 10: asset-aware for forex base/quote handling)
+    # Regime check
     if not _regime_allows(direction, regime, asset=asset, asset_type=asset_type):
-        logger.info(f"Regime blocked: {asset} {direction} ({regime} regime)")
+        logger.info(f"  [{asset}] regime blocked: {direction} ({regime} regime)")
         return None
 
-    # FIX 1: per-asset SL/TP from asset_config
-    tp_pct = asset_config.get_tp(asset)
-    sl_pct = asset_config.get_sl(asset)
+    # Per-asset settings - this is the SINGLE SOURCE OF TRUTH
+    settings = asset_config.get(asset)
+    tp_pct    = settings['tp']
+    sl_pct    = settings['sl']
+    leverage  = settings['leverage']
+    max_hours = settings['max_hours']
+    label     = settings['label']
+    emoji     = settings['emoji']
 
     headlines  = _fetch_news(asset, asset_type)
     sentiment  = _sentiment_score(headlines, direction)
@@ -479,55 +458,75 @@ def _build_signal(df, asset, asset_type, cfg):
         logger.info(f"Low confidence ({confidence}%) {asset} - skipped")
         return None
 
-    # FIX 1: use per-asset SL/TP (not flat cfg values)
     tp = round(price * ((1 + tp_pct) if direction == 'BUY' else (1 - tp_pct)), 6)
     sl = round(price * ((1 - sl_pct) if direction == 'BUY' else (1 + sl_pct)), 6)
+
+    # Expected profit (paper) for log/banner
+    expected_profit = round(cfg.INITIAL_CAPITAL * tp_pct * leverage, 2)
+    expected_loss   = round(cfg.INITIAL_CAPITAL * sl_pct * leverage, 2)
 
     logger.info(f"SIGNAL APPROVED: {direction} {asset} @ {price} | "
                 f"Conf:{confidence}% | Tech:{tech['score']} | "
                 f"Regime:{regime} | News:{sentiment['sentiment']} | "
                 f"HistWR:{historical['win_rate']}% ({historical['sample_size']}) | "
-                f"TP:{tp_pct*100:.2f}% SL:{sl_pct*100:.2f}% | "
+                f"TP:{tp_pct*100:.2f}% SL:{sl_pct*100:.2f}% | Lev:{leverage}x | "
+                f"ExpWin GBP{expected_profit} | "
                 f"{ai.get('reasoning')}")
 
     return {
+        # identifiers
         'asset':           asset,
         'asset_type':      asset_type,
+        'asset_label':     label,
+        'asset_emoji':     emoji,
+        'strategy':        'EMA_TREND',     # only strategy currently implemented
+
+        # trade params (executor reads these directly)
         'direction':       direction,
         'price':           round(price, 6),
         'take_profit':     tp,
         'stop_loss':       sl,
+        'tp_pct':          tp_pct,
+        'sl_pct':          sl_pct,
+        'leverage':        leverage,
+        'max_hours':       max_hours,
+
+        # signal quality
         'confidence':      confidence,
-        'timestamp':       datetime.utcnow().isoformat(),
-        'rsi':             tech.get('rsi'),
         'tech_score':      tech['score'],
         'sentiment_score': sentiment['score'],
         'sentiment':       sentiment.get('sentiment'),
         'historical_wr':   historical.get('win_rate'),
         'sample_size':     historical.get('sample_size'),
         'regime':          regime,
+        'rsi':             tech.get('rsi'),
         'ai_reasoning':    ai.get('reasoning'),
         'ai_risk':         ai.get('key_risk'),
         'top_headlines':   sentiment.get('headlines', [])[:3],
+
+        # bookkeeping
+        'timestamp':       datetime.utcnow().isoformat(),
+        'expected_profit': expected_profit,
+        'expected_loss':   expected_loss,
     }
 
 
 # -- Public API ---------------------------------------------------------------
 
 def scan_markets(cfg, open_trades=None):
-    # Clear regime cache at start of each scan (refreshes once per scan)
     _regime_cache.clear()
-
     signals = []
 
-    # Crypto (24/7)
-    for symbol in cfg.CRYPTO_ASSETS:
-        df  = _fetch_crypto(symbol)
+    # Crypto - 24/7
+    crypto_assets = getattr(cfg, 'CRYPTO_ASSETS', {})
+    for symbol, yf_ticker in crypto_assets.items():
+        df  = _fetch_crypto_yf(yf_ticker)
         sig = _build_signal(df, symbol, 'crypto', cfg)
         if sig:
+            sig['ticker'] = yf_ticker
             signals.append(sig)
 
-    # Forex (FIX 8: only during session hours)
+    # Forex - session hours
     if _is_forex_hours():
         forex_assets = getattr(cfg, 'FOREX_ASSETS', {})
         for ticker, name in forex_assets.items():
@@ -539,19 +538,30 @@ def scan_markets(cfg, open_trades=None):
     else:
         logger.info("Forex session closed (active 08-21 UTC Mon-Fri).")
 
-    # Stocks (NYSE hours)
+    # Stocks - NYSE hours
     if _is_stock_hours():
-        for ticker, name in cfg.STOCK_ASSETS.items():
+        stock_assets = getattr(cfg, 'STOCK_ASSETS', {})
+        for ticker, name in stock_assets.items():
             df  = _fetch_yf(ticker)
             sig = _build_signal(df, ticker, 'stock', cfg)
             if sig:
-                sig['name'] = name
+                sig['display_name'] = name
+                signals.append(sig)
+
+        # ETFs - same hours and treatment as stocks (FIX: was never scanned)
+        etf_assets = getattr(cfg, 'ETF_ASSETS', {})
+        for ticker, name in etf_assets.items():
+            df  = _fetch_yf(ticker)
+            sig = _build_signal(df, ticker, 'stock', cfg)
+            if sig:
+                sig['display_name'] = name
                 signals.append(sig)
     else:
-        logger.info("Stock market closed.")
+        logger.info("Stock/ETF market closed.")
 
-    # Commodities
-    for ticker, name in cfg.COMMODITY_ASSETS.items():
+    # Commodities (use commodity name as asset key, matches asset_config)
+    commodity_assets = getattr(cfg, 'COMMODITY_ASSETS', {})
+    for ticker, name in commodity_assets.items():
         df  = _fetch_yf(ticker)
         sig = _build_signal(df, name, 'commodity', cfg)
         if sig:
@@ -563,17 +573,11 @@ def scan_markets(cfg, open_trades=None):
     return signals
 
 
-def _fetch_crypto(symbol, timeframe='15m', limit=200):
-    try:
-        import ccxt
-        ex   = ccxt.binance({'enableRateLimit': True})
-        data = ex.fetch_ohlcv(symbol, timeframe, limit=limit)
-        df   = pd.DataFrame(data, columns=['ts','open','high','low','close','vol'])
-        df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-        return df
-    except Exception as e:
-        logger.error(f"Crypto fetch ({symbol}): {e}")
-        return None
+# -- Data fetchers ------------------------------------------------------------
+
+def _fetch_crypto_yf(yf_ticker, period='5d', interval='15m', limit=200):
+    """FIX: yfinance for crypto (binance was IP-banned on Render)."""
+    return _fetch_yf(yf_ticker, period=period, interval=interval, limit=limit)
 
 
 def _fetch_yf(ticker, period='5d', interval='15m', limit=200):
@@ -587,14 +591,14 @@ def _fetch_yf(ticker, period='5d', interval='15m', limit=200):
         df.columns = [str(c[0]) if isinstance(c, tuple) else str(c) for c in df.columns]
         df = df.rename(columns={'Datetime':'ts','Date':'ts','Open':'open',
                                  'High':'high','Low':'low','Close':'close','Volume':'vol'})
-        return df[['ts','open','high','low','close','vol']].dropna().tail(limit)
+        cols = ['ts','open','high','low','close','vol']
+        return df[cols].dropna().tail(limit)
     except Exception as e:
         logger.error(f"yfinance ({ticker}): {e}")
         return None
 
 
 def _fetch_daily_yf(ticker, period='400d'):
-    """Fetch daily bars for regime detection."""
     try:
         import yfinance as yf
         raw = yf.download(ticker, period=period, interval='1d',
@@ -611,16 +615,45 @@ def _fetch_daily_yf(ticker, period='400d'):
         return None
 
 
+# -- Price lookup for open trades --------------------------------------------
+# CRITICAL: keys MUST match what is stored in trade['asset']
+#   crypto    -> 'BTC/USDT'  (the symbol from CRYPTO_ASSETS keys)
+#   forex     -> 'EUR/USD'   (the name from FOREX_ASSETS values)
+#   stocks    -> 'NVDA'      (the ticker from STOCK_ASSETS keys)
+#   ETFs      -> 'SPY'       (the ticker from ETF_ASSETS keys)
+#   commodity -> 'GOLD'      (the name from COMMODITY_ASSETS values)
+
 def get_current_prices(cfg):
     prices = {}
-    for s in cfg.CRYPTO_ASSETS:
-        df = _fetch_crypto(s, limit=5)
-        if df is not None:
-            prices[s] = float(df['close'].iloc[-1])
-    forex_assets = getattr(cfg, 'FOREX_ASSETS', {})
-    all_yf = {**cfg.STOCK_ASSETS, **cfg.COMMODITY_ASSETS, **forex_assets}
-    for ticker, name in all_yf.items():
+
+    # Crypto: store under symbol like 'BTC/USDT'
+    for symbol, yf_ticker in getattr(cfg, 'CRYPTO_ASSETS', {}).items():
+        df = _fetch_crypto_yf(yf_ticker, period='1d', interval='5m', limit=5)
+        if df is not None and not df.empty:
+            prices[symbol] = float(df['close'].iloc[-1])
+
+    # Forex: store under name like 'EUR/USD'
+    for ticker, name in getattr(cfg, 'FOREX_ASSETS', {}).items():
         df = _fetch_yf(ticker, period='1d', interval='5m', limit=5)
         if df is not None and not df.empty:
-            prices[name if name else ticker] = float(df['close'].iloc[-1])
+            prices[name] = float(df['close'].iloc[-1])
+
+    # Stocks: store under ticker like 'NVDA' (FIX: was storing under company name)
+    for ticker, name in getattr(cfg, 'STOCK_ASSETS', {}).items():
+        df = _fetch_yf(ticker, period='1d', interval='5m', limit=5)
+        if df is not None and not df.empty:
+            prices[ticker] = float(df['close'].iloc[-1])
+
+    # ETFs: store under ticker like 'SPY' (FIX: was not fetched at all)
+    for ticker, name in getattr(cfg, 'ETF_ASSETS', {}).items():
+        df = _fetch_yf(ticker, period='1d', interval='5m', limit=5)
+        if df is not None and not df.empty:
+            prices[ticker] = float(df['close'].iloc[-1])
+
+    # Commodities: store under name like 'GOLD'
+    for ticker, name in getattr(cfg, 'COMMODITY_ASSETS', {}).items():
+        df = _fetch_yf(ticker, period='1d', interval='5m', limit=5)
+        if df is not None and not df.empty:
+            prices[name] = float(df['close'].iloc[-1])
+
     return prices
