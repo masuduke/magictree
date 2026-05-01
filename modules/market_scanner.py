@@ -237,6 +237,14 @@ def _technical_score(df, asset, ema_f, ema_s, rsi_lo, rsi_hi):
         if ema_sep > 0.3:
             score += 5; reasons.append(f'EMA sep {ema_sep:.2f}%')
 
+    # FIX 11: capture diagnostic info for visibility when no direction fires
+    diag = {
+        'cross_up':   cross_up,
+        'cross_down': cross_down,
+        'rsi_ok':     rsi_ok,
+        'above_50':   price > e50_val,
+    }
+
     return {
         'score':     min(score, 100),
         'direction': direction,
@@ -244,6 +252,7 @@ def _technical_score(df, asset, ema_f, ema_s, rsi_lo, rsi_hi):
         'rsi':       round(cur_rsi, 2),
         'ema_sep':   round(ema_sep, 3),
         'reasons':   reasons,
+        'diag':      diag,
     }
 
 
@@ -418,7 +427,28 @@ def _build_signal(df, asset, asset_type, cfg):
 
     tech = _technical_score(df, asset, cfg.EMA_FAST, cfg.EMA_SLOW,
                             cfg.RSI_LOWER_BAND, cfg.RSI_UPPER_BAND)
-    if not tech['direction'] or tech['score'] < 40:
+
+    # FIX 11: diagnostic logging - so we see why each asset didn't produce a signal
+    if not tech.get('direction'):
+        d = tech.get('diag', {})
+        if d:
+            cross = 'up' if d.get('cross_up') else 'down' if d.get('cross_down') else 'none'
+            reason_bits = []
+            if cross == 'none':
+                reason_bits.append('no EMA cross')
+            else:
+                reason_bits.append(f'cross={cross}')
+                if not d.get('rsi_ok'):
+                    reason_bits.append(f'RSI {tech.get("rsi")} out of band')
+                if cross == 'up' and not d.get('above_50'):
+                    reason_bits.append('price below 50EMA')
+                if cross == 'down' and d.get('above_50'):
+                    reason_bits.append('price above 50EMA')
+            logger.info(f"  [{asset}] no signal - RSI {tech.get('rsi')}, "
+                        f"EMA sep {tech.get('ema_sep')}% | {', '.join(reason_bits)}")
+        return None
+    if tech['score'] < 40:
+        logger.info(f"  [{asset}] weak signal - score {tech['score']} < 40, RSI {tech.get('rsi')}")
         return None
 
     direction = tech['direction']
