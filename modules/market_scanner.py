@@ -117,10 +117,53 @@ def get_stock_regime():
     return regime
 
 
-def _regime_allows(direction, regime):
-    """Reject counter-trend trades."""
+def _regime_allows(direction, regime, asset=None, asset_type=None):
+    """Reject counter-trend trades.
+
+    For crypto/stocks/commodities: regime tracks the asset class itself
+        (BTC for crypto, SPY for stocks). Bull = only BUY, bear = only SELL.
+
+    For forex: regime tracks DXY (USD strength), NOT the pair itself.
+        DXY bull = USD strong:
+            XXX/USD (e.g. GBP/USD): bullish on pair = USD weak -> BLOCK BUY, allow SELL
+            USD/XXX (e.g. USD/JPY): bullish on pair = USD strong -> allow BUY, BLOCK SELL
+        DXY bear = USD weak:
+            XXX/USD: allow BUY (selling weak USD), BLOCK SELL
+            USD/XXX: BLOCK BUY (buying weak USD), allow SELL
+    """
     if regime == 'neutral':
         return True
+
+    # Forex: USD is on one side of the pair, regime is DXY (USD strength)
+    if asset_type == 'forex' and asset and '/' in asset:
+        base, quote = asset.split('/', 1)
+        usd_is_quote = (quote.upper() == 'USD')   # e.g. GBP/USD -> USD is quote
+        usd_is_base  = (base.upper() == 'USD')    # e.g. USD/JPY -> USD is base
+
+        if usd_is_quote:
+            # Pair goes UP when USD goes DOWN
+            # DXY bull (USD up)  -> pair down -> only SELL
+            # DXY bear (USD down) -> pair up   -> only BUY
+            if regime == 'bull' and direction == 'BUY':
+                return False
+            if regime == 'bear' and direction == 'SELL':
+                return False
+            return True
+
+        if usd_is_base:
+            # Pair goes UP when USD goes UP
+            # DXY bull (USD up)  -> pair up   -> only BUY
+            # DXY bear (USD down) -> pair down -> only SELL
+            if regime == 'bull' and direction == 'SELL':
+                return False
+            if regime == 'bear' and direction == 'BUY':
+                return False
+            return True
+
+        # Cross pair (no USD) - DXY regime doesn't apply, allow either direction
+        return True
+
+    # Crypto/stocks/commodities: regime tracks the asset class directly
     if regime == 'bull' and direction == 'SELL':
         return False
     if regime == 'bear' and direction == 'BUY':
@@ -381,8 +424,8 @@ def _build_signal(df, asset, asset_type, cfg):
     direction = tech['direction']
     price     = tech['price']
 
-    # Regime check
-    if not _regime_allows(direction, regime):
+    # Regime check (FIX 10: asset-aware for forex base/quote handling)
+    if not _regime_allows(direction, regime, asset=asset, asset_type=asset_type):
         logger.info(f"Regime blocked: {asset} {direction} ({regime} regime)")
         return None
 
