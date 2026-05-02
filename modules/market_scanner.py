@@ -1,13 +1,18 @@
 """
-market_scanner.py v5 - Comprehensive Rewrite
----------------------------------------------
-Fixes from v4:
+market_scanner.py v6 - Phase 1: Trend continuation entry
+---------------------------------------------------------
+Fixes from v5:
+  - FIX 12: Added trend-continuation entry alongside fresh-crossover entry.
+    Previously, signals only fired on the EXACT bar where fast EMA crossed slow EMA.
+    Now also fires when fast > slow + recent crossover within last 5 bars + RSI in band.
+    Lower base score (30 vs 40) reflects lower confirmation than a fresh cross.
+    This catches trends that started 1-5 bars ago instead of missing them entirely.
+
+Inherited from v5:
   - Crypto fetch: yfinance instead of ccxt.binance (binance IP-banned on Render)
-  - ETFs are now scanned (were dead config)
-  - Signal dict now contains EVERY key the executor needs:
-        leverage, tp_pct, sl_pct, max_hours, strategy, asset_label, asset_emoji
+  - ETFs are scanned (were dead config)
+  - Signal dict contains EVERY key the executor needs
   - get_current_prices() keys results by SAME asset name the trade uses
-        (was a mess: stocks stored under 'NVDA' but priced under 'Nvidia')
   - Forex regime filter handles base/quote direction (DXY-bear allows BUY GBP/USD)
   - Per-asset SL/TP from asset_config (not flat globals)
   - Risk-first AI prompt + min 10 historical setups
@@ -186,27 +191,74 @@ def _technical_score(df, asset, ema_f, ema_s, rsi_lo, rsi_hi):
     vol_ratio = _volume_ratio(df, asset)
     vol_ok    = vol_ratio > 0.8
 
+    # Fresh crossover on the current bar (high-confirmation entry)
     cross_up   = bool(pf <= ps and cf > cs)
     cross_down = bool(pf >= ps and cf < cs)
-    rsi_ok     = bool(rsi_lo <= cur_rsi <= rsi_hi)
-    above_50   = bool(price > e50_val)
+
+    # PHASE 1 (FIX 12): Trend-continuation entry.
+    # If fast > slow now AND a crossover happened within the last LOOKBACK bars,
+    # we're allowed to join an in-progress trend. Lower base score than fresh cross.
+    # Without this, we miss every move where the crossover bar isn't the current one.
+    LOOKBACK = 5  # bars - keep small so we only join JUST-started trends
+    fast_above_now = bool(cf > cs)
+    fast_below_now = bool(cf < cs)
+    recent_cross_up   = False
+    recent_cross_down = False
+    if len(ef) >= LOOKBACK + 2 and not (cross_up or cross_down):
+        # Skip the current bar (already covered by cross_up/cross_down above)
+        # Walk backwards across the last LOOKBACK bars looking for a flip.
+        for i in range(2, LOOKBACK + 2):
+            f_now,  s_now  = ef.iloc[-(i - 1)], es.iloc[-(i - 1)]
+            f_prev, s_prev = ef.iloc[-i],       es.iloc[-i]
+            if f_prev <= s_prev and f_now > s_now and fast_above_now:
+                recent_cross_up = True
+                break
+            if f_prev >= s_prev and f_now < s_now and fast_below_now:
+                recent_cross_down = True
+                break
+
+    rsi_ok   = bool(rsi_lo <= cur_rsi <= rsi_hi)
+    above_50 = bool(price > e50_val)
 
     direction = None
     score     = 0
     reasons   = []
+    entry_kind = None  # 'fresh_cross' or 'trend_continue'
 
+    # BUY: fresh crossover gets full score; trend-continuation gets lower base
     if cross_up and rsi_ok and above_50:
-        direction = 'BUY'
-        score += 40; reasons.append('EMA bullish crossover')
+        direction = 'BUY'; entry_kind = 'fresh_cross'
+        score += 40; reasons.append('EMA bullish crossover (fresh)')
         score += 20; reasons.append(f'RSI {cur_rsi:.1f} in range')
         score += 20; reasons.append('Price above 50 EMA')
         if vol_ok:
             score += 15; reasons.append(f'Volume {vol_ratio:.2f}x')
         if ema_sep > 0.3:
             score += 5; reasons.append(f'EMA sep {ema_sep:.2f}%')
+
+    elif recent_cross_up and rsi_ok and above_50:
+        direction = 'BUY'; entry_kind = 'trend_continue'
+        score += 30; reasons.append('Trend continuation (cross in last 5 bars)')
+        score += 20; reasons.append(f'RSI {cur_rsi:.1f} in range')
+        score += 20; reasons.append('Price above 50 EMA')
+        if vol_ok:
+            score += 15; reasons.append(f'Volume {vol_ratio:.2f}x')
+        if ema_sep > 0.3:
+            score += 5; reasons.append(f'EMA sep {ema_sep:.2f}%')
+
     elif cross_down and rsi_ok and not above_50:
-        direction = 'SELL'
-        score += 40; reasons.append('EMA bearish crossover')
+        direction = 'SELL'; entry_kind = 'fresh_cross'
+        score += 40; reasons.append('EMA bearish crossover (fresh)')
+        score += 20; reasons.append(f'RSI {cur_rsi:.1f} in range')
+        score += 20; reasons.append('Price below 50 EMA')
+        if vol_ok:
+            score += 15; reasons.append(f'Volume {vol_ratio:.2f}x')
+        if ema_sep > 0.3:
+            score += 5; reasons.append(f'EMA sep {ema_sep:.2f}%')
+
+    elif recent_cross_down and rsi_ok and not above_50:
+        direction = 'SELL'; entry_kind = 'trend_continue'
+        score += 30; reasons.append('Trend continuation (cross in last 5 bars)')
         score += 20; reasons.append(f'RSI {cur_rsi:.1f} in range')
         score += 20; reasons.append('Price below 50 EMA')
         if vol_ok:
@@ -215,10 +267,14 @@ def _technical_score(df, asset, ema_f, ema_s, rsi_lo, rsi_hi):
             score += 5; reasons.append(f'EMA sep {ema_sep:.2f}%')
 
     diag = {
-        'cross_up':   cross_up,
-        'cross_down': cross_down,
-        'rsi_ok':     rsi_ok,
-        'above_50':   above_50,
+        'cross_up':          cross_up,
+        'cross_down':        cross_down,
+        'recent_cross_up':   recent_cross_up,
+        'recent_cross_down': recent_cross_down,
+        'rsi_ok':            rsi_ok,
+        'above_50':          above_50,
+        'fast_above':        fast_above_now,
+        'entry_kind':        entry_kind,
     }
 
     return {
@@ -229,6 +285,7 @@ def _technical_score(df, asset, ema_f, ema_s, rsi_lo, rsi_hi):
         'ema_sep':   round(ema_sep, 3),
         'reasons':   reasons,
         'diag':      diag,
+        'entry_kind': entry_kind,
     }
 
 
@@ -405,18 +462,28 @@ def _build_signal(df, asset, asset_type, cfg):
     if not tech.get('direction'):
         d = tech.get('diag') or {}
         if d:
-            cross = 'up' if d.get('cross_up') else 'down' if d.get('cross_down') else 'none'
+            # Decide what the most informative description is
             bits = []
-            if cross == 'none':
-                bits.append('no EMA cross')
+            if d.get('cross_up'):
+                bits.append('fresh cross up')
+            elif d.get('cross_down'):
+                bits.append('fresh cross down')
+            elif d.get('recent_cross_up'):
+                bits.append('recent cross up')
+            elif d.get('recent_cross_down'):
+                bits.append('recent cross down')
+            elif d.get('fast_above'):
+                bits.append('trend up but no recent cross')
             else:
-                bits.append(f'cross={cross}')
-                if not d.get('rsi_ok'):
-                    bits.append(f'RSI {tech.get("rsi")} out of band')
-                if cross == 'up' and not d.get('above_50'):
-                    bits.append('price below 50EMA')
-                if cross == 'down' and d.get('above_50'):
-                    bits.append('price above 50EMA')
+                bits.append('no trend')
+
+            if not d.get('rsi_ok'):
+                bits.append(f'RSI {tech.get("rsi")} out of band')
+            if (d.get('cross_up') or d.get('recent_cross_up')) and not d.get('above_50'):
+                bits.append('price below 50EMA')
+            if (d.get('cross_down') or d.get('recent_cross_down')) and d.get('above_50'):
+                bits.append('price above 50EMA')
+
             logger.info(f"  [{asset}] no signal - RSI {tech.get('rsi')}, "
                         f"sep {tech.get('ema_sep')}% | {', '.join(bits)}")
         return None
@@ -465,8 +532,10 @@ def _build_signal(df, asset, asset_type, cfg):
     expected_profit = round(cfg.INITIAL_CAPITAL * tp_pct * leverage, 2)
     expected_loss   = round(cfg.INITIAL_CAPITAL * sl_pct * leverage, 2)
 
+    entry_kind = tech.get('entry_kind', 'unknown')
+
     logger.info(f"SIGNAL APPROVED: {direction} {asset} @ {price} | "
-                f"Conf:{confidence}% | Tech:{tech['score']} | "
+                f"Entry:{entry_kind} | Conf:{confidence}% | Tech:{tech['score']} | "
                 f"Regime:{regime} | News:{sentiment['sentiment']} | "
                 f"HistWR:{historical['win_rate']}% ({historical['sample_size']}) | "
                 f"TP:{tp_pct*100:.2f}% SL:{sl_pct*100:.2f}% | Lev:{leverage}x | "
@@ -479,7 +548,8 @@ def _build_signal(df, asset, asset_type, cfg):
         'asset_type':      asset_type,
         'asset_label':     label,
         'asset_emoji':     emoji,
-        'strategy':        'EMA_TREND',     # only strategy currently implemented
+        'strategy':        f'EMA_TREND_{entry_kind.upper()}',
+        'entry_kind':      entry_kind,
 
         # trade params (executor reads these directly)
         'direction':       direction,
