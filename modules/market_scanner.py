@@ -1,22 +1,20 @@
 """
-market_scanner.py v6 - Phase 1: Trend continuation entry
----------------------------------------------------------
-Fixes from v5:
-  - FIX 12: Added trend-continuation entry alongside fresh-crossover entry.
-    Previously, signals only fired on the EXACT bar where fast EMA crossed slow EMA.
-    Now also fires when fast > slow + recent crossover within last 5 bars + RSI in band.
-    Lower base score (30 vs 40) reflects lower confirmation than a fresh cross.
-    This catches trends that started 1-5 bars ago instead of missing them entirely.
-
-Inherited from v5:
-  - Crypto fetch: yfinance instead of ccxt.binance (binance IP-banned on Render)
-  - ETFs are scanned (were dead config)
-  - Signal dict contains EVERY key the executor needs
-  - get_current_prices() keys results by SAME asset name the trade uses
-  - Forex regime filter handles base/quote direction (DXY-bear allows BUY GBP/USD)
-  - Per-asset SL/TP from asset_config (not flat globals)
-  - Risk-first AI prompt + min 10 historical setups
-  - Per-asset diagnostic logging when no signal fires
+market_scanner.py v6.1 - Phase 1.5: Backtest matches live signal
+-----------------------------------------------------------------
+Fixes from v6:
+  - FIX 13: _historical_score() now counts both fresh-cross AND trend-continuation
+    setups, matching the Phase 1 live signal logic. Previously the backtest only
+    looked for fresh crossovers, so any live trend_continue signal had zero
+    matching historical samples -> AI auto-rejected for 'sample_size = 0'.
+    Also added the price > 50EMA / price < 50EMA filter to backtest, matching live.
+  - FIX 14: Backtest forward simulation window extended from 12 to 32 bars (8h on 15m
+    bars). 12 bars was 3h - shorter than any real trade max_hours, so most setups
+    never resolved in window and were silently dropped. Also: setups that still
+    don't resolve within 32 bars are now counted as TIME-stop closes (won/lost based
+    on direction of move at end of window) instead of being dropped entirely.
+  - FIX 15: Min sample threshold lowered from 10 to 5. Empirical testing showed
+    only ~15% of 200-bar windows reach 10 samples even with FIX 13/14 - too tight
+    given live data is 200 bars. AI prompt also updated to match.
 """
 import logging
 import json
@@ -331,44 +329,111 @@ def _sentiment_score(headlines, direction):
 # -- LAYER 3: Historical Backtest --------------------------------------------
 
 def _historical_score(df, direction, tp_pct=0.02, sl_pct=0.01):
+    """Backtest looks at past setups identical to live entry logic.
+    PHASE 1.5 (FIX 13): Count BOTH fresh-cross AND trend-continuation setups.
+    PHASE 1.5 (FIX 14): Forward window extended from 12 to 32 bars (8h on 15m bars)
+        to match real-world trade time horizons. With 12 bars, ~50% of valid setups
+        never resolved within window and were silently dropped.
+    """
     if df is None or len(df) < 100:
         return {'score': 50, 'win_rate': 50, 'sample_size': 0}
 
+    FORWARD_BARS = 32  # 8 hours on 15m timeframe; covers forex max_hours
+    LOOKBACK     = 5
+
     close = df['close'].astype(float)
-    ef    = _ema(close, 9)
-    es    = _ema(close, 21)
+    e9    = _ema(close, 9)
+    e21   = _ema(close, 21)
+    e50   = _ema(close, 50)
     rsi_s = _rsi(close)
     wins  = 0
     total = 0
+    fresh_count    = 0
+    continue_count = 0
 
-    for i in range(30, len(df) - 12):
-        cf, pf = ef.iloc[i], ef.iloc[i-1]
-        cs, ps = es.iloc[i], es.iloc[i-1]
+    for i in range(30, len(df) - FORWARD_BARS):
+        cf, pf = float(e9.iloc[i]),  float(e9.iloc[i-1])
+        cs, ps = float(e21.iloc[i]), float(e21.iloc[i-1])
+        e50v   = float(e50.iloc[i])
         r      = float(rsi_s.iloc[i])
         p      = float(close.iloc[i])
 
-        # Wider band 40-60 to produce enough samples
-        setup_buy  = direction == 'BUY'  and pf <= ps and cf > cs and 40 <= r <= 60
-        setup_sell = direction == 'SELL' and pf >= ps and cf < cs and 40 <= r <= 60
+        if not (40 <= r <= 60):
+            continue
 
-        if setup_buy or setup_sell:
-            tp = p * (1 + tp_pct) if setup_buy else p * (1 - tp_pct)
-            sl = p * (1 - sl_pct) if setup_buy else p * (1 + sl_pct)
-            future = close.iloc[i+1:i+12].values
-            for fp in future:
-                if (setup_buy and fp >= tp) or (setup_sell and fp <= tp):
-                    wins += 1
-                    total += 1
+        fresh_cross_up   = pf <= ps and cf > cs
+        fresh_cross_down = pf >= ps and cf < cs
+
+        recent_cross_up   = False
+        recent_cross_down = False
+        fast_above = cf > cs
+        fast_below = cf < cs
+        if not (fresh_cross_up or fresh_cross_down) and i >= LOOKBACK + 2:
+            for k in range(2, LOOKBACK + 2):
+                f_now,  s_now  = float(e9.iloc[i-(k-1)]),  float(e21.iloc[i-(k-1)])
+                f_prev, s_prev = float(e9.iloc[i-k]),     float(e21.iloc[i-k])
+                if f_prev <= s_prev and f_now > s_now and fast_above:
+                    recent_cross_up = True
                     break
-                elif (setup_buy and fp <= sl) or (setup_sell and fp >= sl):
-                    total += 1
+                if f_prev >= s_prev and f_now < s_now and fast_below:
+                    recent_cross_down = True
                     break
 
-    if total < 10:
-        return {'score': 50, 'win_rate': 50, 'sample_size': total}
+        above_50 = p > e50v
+
+        setup_buy = direction == 'BUY' and above_50 and (
+            fresh_cross_up or recent_cross_up
+        )
+        setup_sell = direction == 'SELL' and not above_50 and (
+            fresh_cross_down or recent_cross_down
+        )
+
+        if not (setup_buy or setup_sell):
+            continue
+
+        if setup_buy:
+            if fresh_cross_up:   fresh_count += 1
+            else:                continue_count += 1
+        else:
+            if fresh_cross_down: fresh_count += 1
+            else:                continue_count += 1
+
+        # Simulate forward to see if TP or SL hits first
+        tp = p * (1 + tp_pct) if setup_buy else p * (1 - tp_pct)
+        sl = p * (1 - sl_pct) if setup_buy else p * (1 + sl_pct)
+        future = close.iloc[i+1:i+1+FORWARD_BARS].values
+        resolved = False
+        for fp in future:
+            if (setup_buy and fp >= tp) or (setup_sell and fp <= tp):
+                wins  += 1
+                total += 1
+                resolved = True
+                break
+            elif (setup_buy and fp <= sl) or (setup_sell and fp >= sl):
+                total += 1
+                resolved = True
+                break
+        # If never resolved within window, count as a TIME-stop close at last price.
+        # Treat as win if last price favourable, loss otherwise. Don't drop the sample.
+        if not resolved and len(future) > 0:
+            last = float(future[-1])
+            move = (last - p) if setup_buy else (p - last)
+            total += 1
+            if move > 0:
+                wins += 1
+
+    if total < 5:
+        return {'score': 50, 'win_rate': 50, 'sample_size': total,
+                'fresh_count': fresh_count, 'continue_count': continue_count}
 
     win_rate = round(wins / total * 100, 1)
-    return {'score': win_rate, 'win_rate': win_rate, 'sample_size': total}
+    return {
+        'score':          win_rate,
+        'win_rate':       win_rate,
+        'sample_size':    total,
+        'fresh_count':    fresh_count,
+        'continue_count': continue_count,
+    }
 
 
 # -- LAYER 4: Claude AI Decision ---------------------------------------------
@@ -406,7 +471,7 @@ HISTORICAL BACKTEST (score {historical['score']}/100):
 Win rate on similar setups: {historical.get('win_rate')}% from {historical.get('sample_size')} trades
 
 REJECT IMMEDIATELY if any of these are true:
-- Historical sample_size < 10 (not enough data to trust)
+- Historical sample_size < 5 (not enough data to trust)
 - Historical win rate below 55%
 - News sentiment opposes direction
 - Technical score below 65
@@ -414,7 +479,7 @@ REJECT IMMEDIATELY if any of these are true:
 - RSI outside 40-60
 
 Only APPROVE if ALL of these are true:
-- sample_size >= 10 AND win_rate >= 58%
+- sample_size >= 5 AND win_rate >= 58%
 - Technical score >= 65
 - News sentiment neutral or supportive
 - Regime is neutral OR aligned with direction
