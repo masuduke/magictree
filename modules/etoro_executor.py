@@ -1,9 +1,17 @@
 """
-etoro_executor.py v3 - Comprehensive Rewrite
----------------------------------------------
+etoro_executor.py v3.1 - Phase B: WIN/LOSS by PnL sign
+-------------------------------------------------------
 Opens and closes paper trades, computes PnL with correct leverage.
 
-Fixes from v2:
+Fixes from v3:
+  - FIX 18: Result label (WIN/LOSS/BREAKEVEN) determined by sign of PnL, not
+    by which level was hit. Previously, a profitable trade closed by a trailed
+    SL was labelled LOSS - misleading. Now: pnl>0 -> WIN, pnl<0 -> LOSS,
+    pnl==0 -> BREAKEVEN. Close reason tracked separately as TP/SL/TRAIL/TIME.
+  - Distinguishes TRAIL (trailed-SL hit after activation) from SL (initial
+    stop hit, trail never activated). Uses trail_activated flag set by main.py.
+
+Inherited from v3:
   - Reads leverage / tp_pct / sl_pct / max_hours / labels DIRECTLY from
     asset_config rather than trusting signal dict (defensive: even if scanner
     forgets a key, executor still uses correct values)
@@ -150,19 +158,26 @@ def check_and_close(open_trades, current_prices, cfg):
         else:
             raw_pnl = (entry - price) / entry * leveraged_pos
 
+        pnl = round(raw_pnl, 2)
+
+        # FIX 18: Determine close_reason from what was hit, but determine
+        # WIN/LOSS strictly from sign of PnL. Previously, a profitable trade
+        # closed by a trailed SL was labelled LOSS - confusing and wrong.
         if hit_tp:
-            result       = 'WIN'
-            pnl          = round(raw_pnl, 2)
             close_reason = 'TP'
         elif hit_sl:
-            result       = 'LOSS'
-            pnl          = round(raw_pnl, 2)
-            close_reason = 'SL'
+            # Distinguish trail-stop from original-stop close
+            close_reason = 'TRAIL' if t.get('trail_activated') else 'SL'
         else:
-            pnl          = round(raw_pnl, 2)
-            result       = 'WIN' if pnl > 0 else 'LOSS' if pnl < 0 else 'BREAKEVEN'
             close_reason = 'TIME'
             logger.info(f"Time stop: {asset} after {max_hours}h | PnL: GBP{pnl:.2f}")
+
+        if pnl > 0:
+            result = 'WIN'
+        elif pnl < 0:
+            result = 'LOSS'
+        else:
+            result = 'BREAKEVEN'
 
         t.update({
             'status':       'CLOSED',

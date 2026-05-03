@@ -1,19 +1,23 @@
 """
-main.py v5.1 - Concentration filter
-------------------------------------
+main.py v5.2 - Phase B: Trailing-stop activation gate
+------------------------------------------------------
 Scheduler that runs every 15 min:
   1. Check daily loss limit
   2. Monitor open trades -> close at TP/SL/TIME
-  3. Apply trailing stop on open trades
+  3. Apply trailing stop on open trades (with activation gate)
   4. Scan markets for new signals
   5. Filter out signals for assets that already have open positions
   6. Open trade for highest-confidence approved signal
 
-Fixes from v5:
-  - FIX 16: Concentration filter - skip signals for assets that already have an
-    open position. Without this, trend-continuation setups that persist for many
-    bars fire every scan and open duplicate trades on the same asset.
-    Seen 2026-05-03: 3x BNB BUY positions opened in 45 mins on the same setup.
+Fixes from v5.1:
+  - FIX 17: Trailing-stop activation gate. SL no longer moves until price has
+    crossed TRAIL_ACTIVATION_PCT fraction of TP target (default 50%). Once
+    activated, trail uses the asset's own sl_pct (not flat 0.3%).
+    Previously 0.3% trail scalped every trade on noise wicks - 4 of 6 closed
+    trades were trail-stopped within 0.5% of entry, R:R was 1:1 not designed 2:1.
+
+Inherited from v5.1:
+  - FIX 16: Concentration filter - skip signals for assets already open
 
 Inherited from v5:
   - signal['strategy'] safely fetched with .get()
@@ -72,11 +76,22 @@ def _daily_loss_exceeded():
 # -- Trailing stop ------------------------------------------------------------
 
 def _apply_trailing_stop(trades, current_prices):
-    """Moves stop loss up (BUY) or down (SELL) as price moves favourably."""
+    """Moves stop loss up (BUY) or down (SELL) as price moves favourably.
+    
+    PHASE B / FIX 17: Two-stage trailing stop with activation gate.
+    
+    Stage 1 (entry to activation): SL stays at original level. No trailing.
+    Stage 2 (after activation): SL trails at the asset's own sl_pct distance.
+    
+    Activation triggers when price has moved at least TRAIL_ACTIVATION_PCT
+    fraction of the TP target (default 0.5 = halfway to TP). This prevents
+    the previous bug where 0.3% trailing scalped trades on tiny noise wicks
+    before any real profit developed.
+    """
     if not getattr(cfg, 'TRAILING_STOP_ENABLED', False):
         return False
 
-    trail_pct = getattr(cfg, 'TRAILING_STOP_PCT', 0.003)
+    activation_frac = float(getattr(cfg, 'TRAIL_ACTIVATION_PCT', 0.5))
     updated = False
     for t in trades:
         if t.get('status') != 'OPEN':
@@ -84,19 +99,42 @@ def _apply_trailing_stop(trades, current_prices):
         price = current_prices.get(t.get('asset'))
         if not price:
             continue
+
+        entry  = t.get('entry_price') or 0
+        tp_pct = t.get('tp_pct') or 0
+        sl_pct = t.get('sl_pct') or 0
+        if entry <= 0 or tp_pct <= 0 or sl_pct <= 0:
+            continue  # missing fields - don't modify SL blindly
+
         if t['direction'] == 'BUY':
-            new_sl = round(price * (1 - trail_pct), 6)
+            # How far has price moved in our favour, as a fraction of TP target?
+            move_pct        = (price - entry) / entry
+            activation_move = tp_pct * activation_frac
+            if move_pct < activation_move:
+                continue  # not yet past activation gate, leave initial SL alone
+
+            # Activated: trail SL at the asset's own sl_pct distance below price
+            new_sl = round(price * (1 - sl_pct), 6)
             if new_sl > t.get('stop_loss', 0):
                 t['stop_loss'] = new_sl
+                t['trail_activated'] = True
                 updated = True
-                logger.info(f"Trailing stop UP: {t['asset']} SL -> {new_sl}")
-        else:
-            new_sl = round(price * (1 + trail_pct), 6)
+                logger.info(f"Trail UP: {t['asset']} SL -> {new_sl} "
+                            f"(price +{move_pct*100:.2f}%, gate {activation_move*100:.2f}%)")
+        else:  # SELL
+            move_pct        = (entry - price) / entry
+            activation_move = tp_pct * activation_frac
+            if move_pct < activation_move:
+                continue
+
+            new_sl = round(price * (1 + sl_pct), 6)
             current_sl = t.get('stop_loss', float('inf'))
             if new_sl < current_sl:
                 t['stop_loss'] = new_sl
+                t['trail_activated'] = True
                 updated = True
-                logger.info(f"Trailing stop DOWN: {t['asset']} SL -> {new_sl}")
+                logger.info(f"Trail DOWN: {t['asset']} SL -> {new_sl} "
+                            f"(price -{move_pct*100:.2f}%, gate {activation_move*100:.2f}%)")
     return updated
 
 
@@ -253,7 +291,7 @@ def main():
         len(getattr(cfg, 'COMMODITY_ASSETS', {}))
     )
 
-    logger.info("Trading Bot v5.1 starting")
+    logger.info("Trading Bot v5.2 starting")
     logger.info(f"  Mode:          {'PAPER' if cfg.PAPER_TRADE else 'LIVE'}")
     logger.info(f"  Capital:       GBP{cfg.INITIAL_CAPITAL}")
     logger.info(f"  Assets:        {total_assets} across 5 classes")
@@ -265,7 +303,7 @@ def main():
     logger.info(f"  Trailing stop: {'ON' if getattr(cfg, 'TRAILING_STOP_ENABLED', False) else 'OFF'}")
 
     notifier.send(
-        f"Trading Bot v5.1 Started\n\n"
+        f"Trading Bot v5.2 Started\n\n"
         f"Mode: {'Paper' if cfg.PAPER_TRADE else 'LIVE'}\n"
         f"Capital: GBP{cfg.INITIAL_CAPITAL}\n"
         f"Assets: {total_assets} total\n"
