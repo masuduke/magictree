@@ -1,17 +1,22 @@
 """
-config.py v5 — Fixed
----------------------
-Fixes applied:
-1. EUR/GBP removed from FOREX_ASSETS (too low volatility)
-2. MIN_CONFIDENCE raised to 70 (was 65)
-3. MIN_STRATEGY_SCORE raised to 60 (was 55)
-4. RSI bands widened slightly for more valid signals
+config.py v6 - Persistent disk for trade data
+----------------------------------------------
+Fixes from v5:
+  - DATA_DIR added: configurable via env var, defaults to '/data' (Render disk)
+  - DATA_FILE and EQUITY_FILE now live on persistent disk
+    (was 'data/trades.json' relative path - wiped on every Render redeploy)
+  - CURRENCY_SYMBOL fixed: 'A£' -> 'GBP' (the corrupted byte that broke Telegram)
+  - CHANNEL_NAME default also fixed (was 'A£500 Trading Challenge' -> 'GBP500 Trading Challenge')
+
+Inherited from v5:
+  - EUR/GBP removed from FOREX_ASSETS (too low volatility)
+  - MIN_CONFIDENCE 70, MIN_STRATEGY_SCORE 60
+  - RSI bands 40/60
+  - 5 forex, 6 crypto, 8 stocks, 4 ETFs, 2 commodities = 25 assets
 """
 import os
 
-# ────────────────────────────────────────────────────────────
-# TRADING SETTINGS
-# ────────────────────────────────────────────────────────────
+# -- TRADING SETTINGS --------------------------------------------------------
 PAPER_TRADE        = os.getenv('PAPER_TRADE', 'true').lower() == 'true'
 INITIAL_CAPITAL    = float(os.getenv('INITIAL_CAPITAL', '500'))
 RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '0.01'))
@@ -21,29 +26,23 @@ MAX_TRADES_PER_DAY = int(os.getenv('MAX_TRADES_PER_DAY',   '5'))
 MAX_DAILY_LOSS     = float(os.getenv('MAX_DAILY_LOSS',    '25'))
 MAX_OPEN_TRADES    = int(os.getenv('MAX_OPEN_TRADES',      '3'))
 
-# ────────────────────────────────────────────────────────────
-# SIGNAL QUALITY — FIX: Raised thresholds
-# ────────────────────────────────────────────────────────────
-MIN_CONFIDENCE         = int(os.getenv('MIN_CONFIDENCE', '70'))      # FIX: was 65
-MIN_STRATEGY_SCORE     = int(os.getenv('MIN_STRATEGY_SCORE', '60'))  # FIX: was 55
+# -- SIGNAL QUALITY ----------------------------------------------------------
+MIN_CONFIDENCE         = int(os.getenv('MIN_CONFIDENCE', '70'))
+MIN_STRATEGY_SCORE     = int(os.getenv('MIN_STRATEGY_SCORE', '60'))
 CONFIRM_HIGHER_TF      = os.getenv('CONFIRM_HIGHER_TF', 'true').lower() == 'true'
 CORRELATION_CHECK      = True
 MAX_SAME_DIRECTION     = 2
 
-# ────────────────────────────────────────────────────────────
-# TECHNICAL SETTINGS
-# ────────────────────────────────────────────────────────────
+# -- TECHNICAL SETTINGS ------------------------------------------------------
 EMA_FAST        = 9
 EMA_SLOW        = 21
 RSI_PERIOD      = 14
-RSI_LOWER_BAND  = int(os.getenv('RSI_LOWER_BAND', '40'))   # FIX: was 42
-RSI_UPPER_BAND  = int(os.getenv('RSI_UPPER_BAND', '60'))   # FIX: was 58
+RSI_LOWER_BAND  = int(os.getenv('RSI_LOWER_BAND', '40'))
+RSI_UPPER_BAND  = int(os.getenv('RSI_UPPER_BAND', '60'))
 
-# ────────────────────────────────────────────────────────────
-# ASSET UNIVERSE
-# ────────────────────────────────────────────────────────────
+# -- ASSET UNIVERSE ----------------------------------------------------------
 
-# Crypto — 24/7
+# Crypto - 24/7
 CRYPTO_ASSETS = {
     'BTC/USDT':  'BTC-USD',
     'ETH/USDT':  'ETH-USD',
@@ -53,8 +52,7 @@ CRYPTO_ASSETS = {
     'AVAX/USDT': 'AVAX-USD',
 }
 
-# Forex — London+NY sessions (30x leverage)
-# FIX: EUR/GBP REMOVED — daily range 0.2-0.3%, TP of 0.3% unreachable
+# Forex - London+NY sessions (30x leverage)
 FOREX_ASSETS = {
     'EURUSD=X': 'EUR/USD',
     'GBPUSD=X': 'GBP/USD',
@@ -63,7 +61,7 @@ FOREX_ASSETS = {
     'USDCAD=X': 'USD/CAD',
 }
 
-# Stocks — NY session only
+# Stocks - NY session only
 STOCK_ASSETS = {
     'NVDA':  'Nvidia',
     'TSLA':  'Tesla',
@@ -89,23 +87,17 @@ COMMODITY_ASSETS = {
     'SI=F': 'SILVER',
 }
 
-# ────────────────────────────────────────────────────────────
-# SESSION HOURS (UTC)
-# ────────────────────────────────────────────────────────────
+# -- SESSION HOURS (UTC) -----------------------------------------------------
 LONDON_OPEN  = 8
 LONDON_CLOSE = 17
 NY_OPEN      = 14
 NY_CLOSE     = 21
 
-# ────────────────────────────────────────────────────────────
-# TRAILING STOP
-# ────────────────────────────────────────────────────────────
+# -- TRAILING STOP -----------------------------------------------------------
 TRAILING_STOP_ENABLED = True
 TRAILING_STOP_PCT     = 0.003
 
-# ────────────────────────────────────────────────────────────
-# API KEYS
-# ────────────────────────────────────────────────────────────
+# -- API KEYS ----------------------------------------------------------------
 ANTHROPIC_API_KEY      = os.getenv('ANTHROPIC_API_KEY', '')
 ETORO_API_KEY          = os.getenv('ETORO_API_KEY', '')
 CAPITAL_API_KEY        = os.getenv('CAPITAL_API_KEY', '')
@@ -123,19 +115,22 @@ YOUTUBE_CLIENT_SECRET  = os.getenv('YOUTUBE_CLIENT_SECRET', '')
 TIKTOK_ACCESS_TOKEN    = os.getenv('TIKTOK_ACCESS_TOKEN', '')
 CLOUDINARY_URL         = os.getenv('CLOUDINARY_URL', '')
 
-# ────────────────────────────────────────────────────────────
-# SCHEDULER
-# ────────────────────────────────────────────────────────────
+# -- SCHEDULER ---------------------------------------------------------------
 SCAN_INTERVAL_MINUTES = int(os.getenv('SCAN_INTERVAL_MINUTES', '15'))
 DAILY_POST_HOUR       = int(os.getenv('DAILY_POST_HOUR', '20'))
 
-# ────────────────────────────────────────────────────────────
-# PATHS + BRANDING
-# ────────────────────────────────────────────────────────────
-DATA_FILE       = 'data/trades.json'
-EQUITY_FILE     = 'data/equity.json'
+# -- PATHS + BRANDING --------------------------------------------------------
+# FIX: trades and equity now live on persistent disk so they survive redeploys.
+# DATA_DIR defaults to '/data' (the Render disk mount path). Override with env
+# var DATA_DIR for local dev, e.g. set DATA_DIR=./data for laptop testing.
+DATA_DIR        = os.getenv('DATA_DIR', '/data')
+DATA_FILE       = os.path.join(DATA_DIR, 'trades.json')
+EQUITY_FILE     = os.path.join(DATA_DIR, 'equity.json')
+
+# Slides/videos can stay ephemeral - they're regenerated daily from trade data
 SLIDES_DIR      = 'outputs/slides'
 VIDEOS_DIR      = 'outputs/videos'
-CHANNEL_NAME    = os.getenv('CHANNEL_NAME',   '£500 Trading Challenge')
+
+CHANNEL_NAME    = os.getenv('CHANNEL_NAME',   'GBP500 Trading Challenge')
 CHANNEL_HANDLE  = os.getenv('CHANNEL_HANDLE', '@TradingFromZero')
-CURRENCY_SYMBOL = '£'
+CURRENCY_SYMBOL = 'GBP'
