@@ -1,17 +1,24 @@
 """
-main.py v5 - Comprehensive Rewrite
------------------------------------
+main.py v5.1 - Concentration filter
+------------------------------------
 Scheduler that runs every 15 min:
   1. Check daily loss limit
   2. Monitor open trades -> close at TP/SL/TIME
   3. Apply trailing stop on open trades
   4. Scan markets for new signals
-  5. Open trade for highest-confidence approved signal
+  5. Filter out signals for assets that already have open positions
+  6. Open trade for highest-confidence approved signal
 
-Fixes from v4:
-  - signal['strategy'] safely fetched with .get() (was KeyError before)
-  - GBP currency symbol used correctly (was corrupted 'A£' everywhere)
-  - Trailing stop logic owned by main.py only (executor no longer touches SL)
+Fixes from v5:
+  - FIX 16: Concentration filter - skip signals for assets that already have an
+    open position. Without this, trend-continuation setups that persist for many
+    bars fire every scan and open duplicate trades on the same asset.
+    Seen 2026-05-03: 3x BNB BUY positions opened in 45 mins on the same setup.
+
+Inherited from v5:
+  - signal['strategy'] safely fetched with .get()
+  - GBP currency symbol used correctly
+  - Trailing stop logic owned by main.py only
   - Banner reflects asset count from all 5 classes including ETFs
 """
 import time
@@ -152,6 +159,21 @@ def run_scan():
     if not signals:
         return
 
+    # FIX 16: Concentration filter - skip signals for assets that already have
+    # an open position. Without this, the same trend continuation setup fires
+    # every scan and opens duplicate trades on the same asset (e.g. 3x BNB seen
+    # 2026-05-03). One position per asset, regardless of direction.
+    open_assets = {t.get('asset') for t in open_trades_fresh if t.get('asset')}
+    filtered = [s for s in signals if s.get('asset') not in open_assets]
+    skipped = [s for s in signals if s.get('asset') in open_assets]
+    for s in skipped:
+        logger.info(f"Concentration block: {s.get('asset')} {s.get('direction')} "
+                    f"- already have open position")
+    signals = filtered
+    if not signals:
+        logger.info("All signals blocked by concentration filter")
+        return
+
     # Step 5: Open the highest-confidence signal (one per scan)
     signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
     best = signals[0]
@@ -231,7 +253,7 @@ def main():
         len(getattr(cfg, 'COMMODITY_ASSETS', {}))
     )
 
-    logger.info("Trading Bot v5 starting")
+    logger.info("Trading Bot v5.1 starting")
     logger.info(f"  Mode:          {'PAPER' if cfg.PAPER_TRADE else 'LIVE'}")
     logger.info(f"  Capital:       GBP{cfg.INITIAL_CAPITAL}")
     logger.info(f"  Assets:        {total_assets} across 5 classes")
@@ -243,7 +265,7 @@ def main():
     logger.info(f"  Trailing stop: {'ON' if getattr(cfg, 'TRAILING_STOP_ENABLED', False) else 'OFF'}")
 
     notifier.send(
-        f"Trading Bot v5 Started\n\n"
+        f"Trading Bot v5.1 Started\n\n"
         f"Mode: {'Paper' if cfg.PAPER_TRADE else 'LIVE'}\n"
         f"Capital: GBP{cfg.INITIAL_CAPITAL}\n"
         f"Assets: {total_assets} total\n"
