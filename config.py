@@ -1,18 +1,14 @@
 """
-config.py v6 - Persistent disk for trade data
-----------------------------------------------
-Fixes from v5:
-  - DATA_DIR added: configurable via env var, defaults to '/data' (Render disk)
-  - DATA_FILE and EQUITY_FILE now live on persistent disk
-    (was 'data/trades.json' relative path - wiped on every Render redeploy)
-  - CURRENCY_SYMBOL fixed: 'A£' -> 'GBP' (the corrupted byte that broke Telegram)
-  - CHANNEL_NAME default also fixed (was 'A£500 Trading Challenge' -> 'GBP500 Trading Challenge')
+config.py v6.1 - Added EUR/JPY and USO oil ETF
+-----------------------------------------------
+Fixes from v6:
+  - FIX 20: Added EUR/JPY (forex cross pair, 30x leverage)
+  - FIX 20: Added USO oil ETF (5x leverage, US session only)
+    Total assets now 27: 6 crypto, 6 forex, 8 stocks, 5 ETFs, 2 commodities
 
-Inherited from v5:
-  - EUR/GBP removed from FOREX_ASSETS (too low volatility)
-  - MIN_CONFIDENCE 70, MIN_STRATEGY_SCORE 60
-  - RSI bands 40/60
-  - 5 forex, 6 crypto, 8 stocks, 4 ETFs, 2 commodities = 25 assets
+Inherited from v6:
+  - DATA_DIR + persistent disk paths
+  - CURRENCY_SYMBOL = 'GBP' (was corrupted)
 """
 import os
 
@@ -59,6 +55,7 @@ FOREX_ASSETS = {
     'USDJPY=X': 'USD/JPY',
     'AUDUSD=X': 'AUD/USD',
     'USDCAD=X': 'USD/CAD',
+    'EURJPY=X': 'EUR/JPY',  # FIX 20: JPY cross pair (often clearer trends)
 }
 
 # Stocks - NY session only
@@ -79,6 +76,7 @@ ETF_ASSETS = {
     'QQQ': 'Nasdaq ETF',
     'GLD': 'Gold ETF',
     'SLV': 'Silver ETF',
+    'USO': 'Oil ETF',  # FIX 20: oil exposure via ETF (avoids =F futures issues)
 }
 
 # Commodities

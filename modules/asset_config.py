@@ -1,17 +1,18 @@
 """
-asset_config.py v4 - Comprehensive Rewrite
--------------------------------------------
+asset_config.py v5 - Added EUR/JPY and USO oil ETF
+---------------------------------------------------
 Per-asset trade settings (TP, SL, leverage, max_hours).
 
-Fixes from v3:
-  - Added SILVER entry (was missing - silver signals fell through to DEFAULT)
-  - Replaced corrupted UTF-8 emojis with simple ASCII-safe placeholders
-  - Aligned all keys to what market_scanner passes:
-      crypto -> 'BTC/USDT' style
-      forex  -> 'EUR/USD' style
-      stocks -> 'NVDA' style
-      ETFs   -> 'SPY' style
-      commodity -> 'GOLD' / 'SILVER' style
+Fixes from v4:
+  - FIX 20: Added EUR/JPY (forex cross, 30x leverage, 0.5% TP / 0.3% SL)
+  - FIX 20: Added USO oil ETF (5x leverage, 2.5% TP / 1.2% SL, US session only)
+    Using ETF instead of CL=F futures to avoid yfinance "delisted" issues we
+    have on GC=F/SI=F. Trade-off: 5x leverage cap vs 10x on real broker oil CFDs.
+
+Inherited from v4:
+  - SILVER entry (was missing in v3 - silver signals fell through to DEFAULT)
+  - ASCII-safe emoji placeholders
+  - Keys aligned to what market_scanner passes
 """
 
 ASSET_SETTINGS = {
@@ -28,6 +29,9 @@ ASSET_SETTINGS = {
                   'label': 'Aussie/Dollar',   'emoji': 'AUD', 'priority': 2},
     'USD/CAD':   {'tp': 0.004, 'sl': 0.002, 'max_hours': 8,  'leverage': 30,
                   'label': 'Dollar/CAD',      'emoji': 'CAD', 'priority': 2},
+    # FIX 20: EUR/JPY added - JPY cross pair often produces clearer trends than majors
+    'EUR/JPY':   {'tp': 0.005, 'sl': 0.003, 'max_hours': 8,  'leverage': 30,
+                  'label': 'Euro/Yen',        'emoji': 'EUJ', 'priority': 2},
 
     # -- CRYPTO (2x leverage; SLs widened in v3 fix) --------------------------
     'BTC/USDT':  {'tp': 0.030, 'sl': 0.020, 'max_hours': 12, 'leverage': 2,
@@ -77,6 +81,9 @@ ASSET_SETTINGS = {
                   'label': 'Gold ETF',        'emoji': 'GLD', 'priority': 3},
     'SLV':       {'tp': 0.020, 'sl': 0.007, 'max_hours': 7,  'leverage': 5,
                   'label': 'Silver ETF',      'emoji': 'SLV', 'priority': 3},
+    # FIX 20: USO oil ETF added - oil exposure without =F futures ticker problems
+    'USO':       {'tp': 0.025, 'sl': 0.012, 'max_hours': 7,  'leverage': 5,
+                  'label': 'Oil ETF',         'emoji': 'OIL', 'priority': 2},
 }
 
 DEFAULT = {'tp': 0.020, 'sl': 0.008, 'max_hours': 12,
