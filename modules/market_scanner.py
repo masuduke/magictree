@@ -1,20 +1,16 @@
 """
-market_scanner.py v6.1 - Phase 1.5: Backtest matches live signal
------------------------------------------------------------------
-Fixes from v6:
-  - FIX 13: _historical_score() now counts both fresh-cross AND trend-continuation
-    setups, matching the Phase 1 live signal logic. Previously the backtest only
-    looked for fresh crossovers, so any live trend_continue signal had zero
-    matching historical samples -> AI auto-rejected for 'sample_size = 0'.
-    Also added the price > 50EMA / price < 50EMA filter to backtest, matching live.
-  - FIX 14: Backtest forward simulation window extended from 12 to 32 bars (8h on 15m
-    bars). 12 bars was 3h - shorter than any real trade max_hours, so most setups
-    never resolved in window and were silently dropped. Also: setups that still
-    don't resolve within 32 bars are now counted as TIME-stop closes (won/lost based
-    on direction of move at end of window) instead of being dropped entirely.
-  - FIX 15: Min sample threshold lowered from 10 to 5. Empirical testing showed
-    only ~15% of 200-bar windows reach 10 samples even with FIX 13/14 - too tight
-    given live data is 200 bars. AI prompt also updated to match.
+market_scanner.py v6.2 - Phase 1.5 + yfinance retry
+----------------------------------------------------
+Fixes from v6.1:
+  - FIX 19: yfinance retry-once helper. yfinance occasionally returns empty for
+    valid tickers (transient "possibly delisted" warnings). Seen 2026-05-06: all
+    6 crypto symbols failed simultaneously for ~15 min, blocking trade evaluation
+    on 3 open positions. Retry once after 20s before giving up.
+
+Inherited from v6.1:
+  - FIX 13/14/15: Backtest matches live signal logic (fresh-cross + trend-continue),
+    forward window extended to 32 bars, min sample threshold lowered to 5.
+  - FIX 12: Trend-continuation entry alongside fresh-crossover entry.
 """
 import logging
 import json
@@ -715,13 +711,35 @@ def _fetch_crypto_yf(yf_ticker, period='5d', interval='15m', limit=200):
     return _fetch_yf(yf_ticker, period=period, interval=interval, limit=limit)
 
 
-def _fetch_yf(ticker, period='5d', interval='15m', limit=200):
-    try:
-        import yfinance as yf
-        raw = yf.download(ticker, period=period, interval=interval,
-                          progress=False, auto_adjust=True)
-        if raw.empty:
+def _yf_download_with_retry(ticker, period, interval, retry_delay=20):
+    """FIX 19: yfinance occasionally returns empty for valid tickers (e.g. BTC-USD
+    flagged 'possibly delisted'). Most are transient. Retry ONCE after a short
+    wait. If still empty, give up - don't block the scan loop indefinitely.
+    """
+    import yfinance as yf
+    import time
+    for attempt in (1, 2):
+        try:
+            raw = yf.download(ticker, period=period, interval=interval,
+                              progress=False, auto_adjust=True)
+            if not raw.empty:
+                return raw
+            if attempt == 1:
+                logger.info(f"yfinance empty for {ticker} - retrying in {retry_delay}s")
+                time.sleep(retry_delay)
+        except Exception as e:
+            # Real exceptions (network, parse errors) - don't bother retrying
+            logger.error(f"yfinance ({ticker}): {e}")
             return None
+    logger.warning(f"yfinance ({ticker}) - empty after retry, giving up")
+    return None
+
+
+def _fetch_yf(ticker, period='5d', interval='15m', limit=200):
+    raw = _yf_download_with_retry(ticker, period, interval)
+    if raw is None or raw.empty:
+        return None
+    try:
         df = raw.reset_index()
         df.columns = [str(c[0]) if isinstance(c, tuple) else str(c) for c in df.columns]
         df = df.rename(columns={'Datetime':'ts','Date':'ts','Open':'open',
@@ -729,24 +747,22 @@ def _fetch_yf(ticker, period='5d', interval='15m', limit=200):
         cols = ['ts','open','high','low','close','vol']
         return df[cols].dropna().tail(limit)
     except Exception as e:
-        logger.error(f"yfinance ({ticker}): {e}")
+        logger.error(f"yfinance parse ({ticker}): {e}")
         return None
 
 
 def _fetch_daily_yf(ticker, period='400d'):
+    raw = _yf_download_with_retry(ticker, period, '1d')
+    if raw is None or raw.empty:
+        return None
     try:
-        import yfinance as yf
-        raw = yf.download(ticker, period=period, interval='1d',
-                          progress=False, auto_adjust=True)
-        if raw.empty:
-            return None
         df = raw.reset_index()
         df.columns = [str(c[0]) if isinstance(c, tuple) else str(c) for c in df.columns]
         df = df.rename(columns={'Datetime':'ts','Date':'ts','Open':'open',
                                  'High':'high','Low':'low','Close':'close','Volume':'vol'})
         return df[['ts','open','high','low','close','vol']].dropna()
     except Exception as e:
-        logger.error(f"yfinance daily ({ticker}): {e}")
+        logger.error(f"yfinance daily parse ({ticker}): {e}")
         return None
 
 
