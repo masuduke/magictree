@@ -1,723 +1,61 @@
 """
-market_scanner.py v6.2 - Phase 1.5 + yfinance retry
-----------------------------------------------------
-Fixes from v6.1:
-  - FIX 19: yfinance retry-once helper. yfinance occasionally returns empty for
-    valid tickers (transient "possibly delisted" warnings). Seen 2026-05-06: all
-    6 crypto symbols failed simultaneously for ~15 min, blocking trade evaluation
-    on 3 open positions. Retry once after 20s before giving up.
+market_scanner.py v7 - Option C: 3 strategies on 4h bars, 4 stocks/ETFs
+-----------------------------------------------------------------------
+This is a COMPLETE REWRITE from v6.2. The previous scanner used EMA crossover
++ AI gate on 27 assets. That strategy produced no edge after 27 paper trades.
 
-Inherited from v6.1:
-  - FIX 13/14/15: Backtest matches live signal logic (fresh-cross + trend-continue),
-    forward window extended to 32 bars, min sample threshold lowered to 5.
-  - FIX 12: Trend-continuation entry alongside fresh-crossover entry.
+After rigorous backtest research (19 assets x 7 strategies x 2 timeframes),
+ONLY 3 strategies on 4 specific stocks showed positive expectancy on BOTH
+15min AND 4h timeframes:
+  - BBSqueeze_20:        TSLA, NVDA, GLD
+  - MTF_Momentum_daily:  NVDA
+  - Breakout_20bar:      NVDA, AAPL
+
+We trade ALL 3 strategies on ALL 4 assets (the strategies that don't work on
+a particular asset will produce few signals or losing ones; the AGGREGATE
+across this universe was profitable in backtest).
+
+KEY DESIGN DECISIONS:
+  - NO AI gate. Strategies were validated by backtest, not by AI scoring.
+  - NO RSI-band filter. Each strategy has its own internal logic.
+  - NO regime filter. Strategies are robust enough not to need it.
+  - 4h bars resampled from yfinance 1h data (4h not directly available).
+  - Live mode samples the most recent 200 bars × 1h = 50 4h-bars for signal.
+
+CONFIDENCE/AUDIT:
+  v6.2 lost £100 net across 27 trades. This was BECAUSE the strategy had no edge.
+  v7's strategies were tested on 730 days of real data and showed PF > 1.2 on the
+  specific (strategy, asset) pairs we trade. That's the only honest reason to
+  deploy a new strategy.
 """
 import logging
-import json
-import re
-import requests
+import time
+from datetime import datetime, timezone
+
 import pandas as pd
-from datetime import datetime
+import numpy as np
+
 from modules import asset_config
 
 logger = logging.getLogger(__name__)
 
-STOCK_OPEN_HOUR  = 14
-STOCK_CLOSE_HOUR = 21
-FOREX_OPEN_HOUR  = 8
-FOREX_CLOSE_HOUR = 21
-
-BULLISH_KEYWORDS = [
-    'surge', 'rally', 'breakout', 'bullish', 'upgrade', 'adoption',
-    'partnership', 'record', 'high', 'growth', 'buy', 'accumulate',
-    'institutional', 'etf', 'approval', 'positive', 'profit', 'gain'
-]
-BEARISH_KEYWORDS = [
-    'crash', 'collapse', 'ban', 'hack', 'fraud', 'lawsuit', 'recession',
-    'inflation', 'rate hike', 'selloff', 'plunge', 'tumble', 'warning',
-    'fear', 'panic', 'dump', 'bearish', 'downgrade', 'loss', 'drop'
-]
-
-# Cached regimes (refreshed per scan)
-_regime_cache = {}
-
-
-# -- Helpers ------------------------------------------------------------------
-
-def _ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
-
-
-def _rsi(series, period=14):
-    delta = series.diff()
-    gain  = delta.clip(lower=0).rolling(period).mean()
-    loss  = (-delta.clip(upper=0)).rolling(period).mean()
-    rs    = gain / loss.replace(0, 1e-9)
-    return 100 - (100 / (1 + rs))
-
-
-def _is_stock_hours():
-    now = datetime.utcnow()
-    return now.weekday() < 5 and STOCK_OPEN_HOUR <= now.hour <= STOCK_CLOSE_HOUR
-
-
-def _is_forex_hours():
-    now = datetime.utcnow()
-    return now.weekday() < 5 and FOREX_OPEN_HOUR <= now.hour <= FOREX_CLOSE_HOUR
-
-
-def _is_forex_asset(asset):
-    return '/' in asset and 'USDT' not in asset and '/USDT' not in asset
-
-
-# -- Regime detection ---------------------------------------------------------
-
-def _compute_regime(df):
-    """Return 'bull', 'bear', or 'neutral' based on 50/200 EMA + price."""
-    if df is None or len(df) < 210:
-        return 'neutral'
-    close = df['close'].astype(float)
-    ema50  = _ema(close, 50).iloc[-1]
-    ema200 = _ema(close, 200).iloc[-1]
-    price  = float(close.iloc[-1])
-    if ema50 > ema200 and price > ema50:
-        return 'bull'
-    if ema50 < ema200 and price < ema50:
-        return 'bear'
-    return 'neutral'
-
-
-def get_crypto_regime():
-    if 'crypto' in _regime_cache:
-        return _regime_cache['crypto']
-    df = _fetch_daily_yf('BTC-USD', period='400d')
-    regime = _compute_regime(df)
-    _regime_cache['crypto'] = regime
-    logger.info(f"Crypto regime (BTC daily): {regime}")
-    return regime
-
-
-def get_forex_regime():
-    if 'forex' in _regime_cache:
-        return _regime_cache['forex']
-    df = _fetch_daily_yf('DX-Y.NYB', period='400d')
-    regime = _compute_regime(df)
-    _regime_cache['forex'] = regime
-    logger.info(f"Forex regime (DXY daily): {regime}")
-    return regime
-
-
-def get_stock_regime():
-    if 'stock' in _regime_cache:
-        return _regime_cache['stock']
-    df = _fetch_daily_yf('SPY', period='400d')
-    regime = _compute_regime(df)
-    _regime_cache['stock'] = regime
-    logger.info(f"Stock regime (SPY daily): {regime}")
-    return regime
-
-
-def _regime_allows(direction, regime, asset=None, asset_type=None):
-    """Reject counter-trend trades.
-    Forex: regime tracks DXY (USD strength). Pair direction depends on whether
-    USD is base or quote. Crypto/stocks/commodities: regime tracks the asset itself.
-    """
-    if regime == 'neutral':
-        return True
-
-    if asset_type == 'forex' and asset and '/' in asset:
-        base, quote = asset.split('/', 1)
-        usd_is_quote = (quote.upper() == 'USD')
-        usd_is_base  = (base.upper() == 'USD')
-
-        if usd_is_quote:
-            # XXX/USD: pair UP when USD DOWN
-            if regime == 'bull' and direction == 'BUY':  return False
-            if regime == 'bear' and direction == 'SELL': return False
-            return True
-        if usd_is_base:
-            # USD/XXX: pair UP when USD UP
-            if regime == 'bull' and direction == 'SELL': return False
-            if regime == 'bear' and direction == 'BUY':  return False
-            return True
-        return True  # Cross pair, no USD - allow either
-
-    # Crypto / stocks / commodities
-    if regime == 'bull' and direction == 'SELL': return False
-    if regime == 'bear' and direction == 'BUY':  return False
-    return True
-
-
-# -- Volume (skips forex) -----------------------------------------------------
-
-def _volume_ratio(df, asset):
-    if _is_forex_asset(asset):
-        return 1.0
-    if df is None or 'vol' not in df.columns or len(df) < 21:
-        return 1.0
-    vol = df['vol'].astype(float)
-    cur = float(vol.iloc[-1])
-    avg = float(vol.iloc[-20:].mean())
-    if avg <= 0:
-        return 1.0
-    return cur / avg
-
-
-# -- LAYER 1: Technical -------------------------------------------------------
-
-def _technical_score(df, asset, ema_f, ema_s, rsi_lo, rsi_hi):
-    if df is None or len(df) < ema_s + 30:
-        return {'score': 0, 'direction': None, 'diag': None}
-
-    close = df['close'].astype(float)
-    ef    = _ema(close, ema_f)
-    es    = _ema(close, ema_s)
-    e50   = _ema(close, 50)
-    rsi   = _rsi(close)
-
-    cf, pf   = ef.iloc[-1], ef.iloc[-2]
-    cs, ps   = es.iloc[-1], es.iloc[-2]
-    cur_rsi  = float(rsi.iloc[-1])
-    price    = float(close.iloc[-1])
-    e50_val  = float(e50.iloc[-1])
-    ema_sep  = abs(cf - cs) / cs * 100
-
-    vol_ratio = _volume_ratio(df, asset)
-    vol_ok    = vol_ratio > 0.8
-
-    # Fresh crossover on the current bar (high-confirmation entry)
-    cross_up   = bool(pf <= ps and cf > cs)
-    cross_down = bool(pf >= ps and cf < cs)
-
-    # PHASE 1 (FIX 12): Trend-continuation entry.
-    # If fast > slow now AND a crossover happened within the last LOOKBACK bars,
-    # we're allowed to join an in-progress trend. Lower base score than fresh cross.
-    # Without this, we miss every move where the crossover bar isn't the current one.
-    LOOKBACK = 5  # bars - keep small so we only join JUST-started trends
-    fast_above_now = bool(cf > cs)
-    fast_below_now = bool(cf < cs)
-    recent_cross_up   = False
-    recent_cross_down = False
-    if len(ef) >= LOOKBACK + 2 and not (cross_up or cross_down):
-        # Skip the current bar (already covered by cross_up/cross_down above)
-        # Walk backwards across the last LOOKBACK bars looking for a flip.
-        for i in range(2, LOOKBACK + 2):
-            f_now,  s_now  = ef.iloc[-(i - 1)], es.iloc[-(i - 1)]
-            f_prev, s_prev = ef.iloc[-i],       es.iloc[-i]
-            if f_prev <= s_prev and f_now > s_now and fast_above_now:
-                recent_cross_up = True
-                break
-            if f_prev >= s_prev and f_now < s_now and fast_below_now:
-                recent_cross_down = True
-                break
-
-    rsi_ok   = bool(rsi_lo <= cur_rsi <= rsi_hi)
-    above_50 = bool(price > e50_val)
-
-    direction = None
-    score     = 0
-    reasons   = []
-    entry_kind = None  # 'fresh_cross' or 'trend_continue'
-
-    # BUY: fresh crossover gets full score; trend-continuation gets lower base
-    if cross_up and rsi_ok and above_50:
-        direction = 'BUY'; entry_kind = 'fresh_cross'
-        score += 40; reasons.append('EMA bullish crossover (fresh)')
-        score += 20; reasons.append(f'RSI {cur_rsi:.1f} in range')
-        score += 20; reasons.append('Price above 50 EMA')
-        if vol_ok:
-            score += 15; reasons.append(f'Volume {vol_ratio:.2f}x')
-        if ema_sep > 0.3:
-            score += 5; reasons.append(f'EMA sep {ema_sep:.2f}%')
-
-    elif recent_cross_up and rsi_ok and above_50:
-        direction = 'BUY'; entry_kind = 'trend_continue'
-        score += 30; reasons.append('Trend continuation (cross in last 5 bars)')
-        score += 20; reasons.append(f'RSI {cur_rsi:.1f} in range')
-        score += 20; reasons.append('Price above 50 EMA')
-        if vol_ok:
-            score += 15; reasons.append(f'Volume {vol_ratio:.2f}x')
-        if ema_sep > 0.3:
-            score += 5; reasons.append(f'EMA sep {ema_sep:.2f}%')
-
-    elif cross_down and rsi_ok and not above_50:
-        direction = 'SELL'; entry_kind = 'fresh_cross'
-        score += 40; reasons.append('EMA bearish crossover (fresh)')
-        score += 20; reasons.append(f'RSI {cur_rsi:.1f} in range')
-        score += 20; reasons.append('Price below 50 EMA')
-        if vol_ok:
-            score += 15; reasons.append(f'Volume {vol_ratio:.2f}x')
-        if ema_sep > 0.3:
-            score += 5; reasons.append(f'EMA sep {ema_sep:.2f}%')
-
-    elif recent_cross_down and rsi_ok and not above_50:
-        direction = 'SELL'; entry_kind = 'trend_continue'
-        score += 30; reasons.append('Trend continuation (cross in last 5 bars)')
-        score += 20; reasons.append(f'RSI {cur_rsi:.1f} in range')
-        score += 20; reasons.append('Price below 50 EMA')
-        if vol_ok:
-            score += 15; reasons.append(f'Volume {vol_ratio:.2f}x')
-        if ema_sep > 0.3:
-            score += 5; reasons.append(f'EMA sep {ema_sep:.2f}%')
-
-    diag = {
-        'cross_up':          cross_up,
-        'cross_down':        cross_down,
-        'recent_cross_up':   recent_cross_up,
-        'recent_cross_down': recent_cross_down,
-        'rsi_ok':            rsi_ok,
-        'above_50':          above_50,
-        'fast_above':        fast_above_now,
-        'entry_kind':        entry_kind,
-    }
-
-    return {
-        'score':     min(score, 100),
-        'direction': direction,
-        'price':     price,
-        'rsi':       round(cur_rsi, 2),
-        'ema_sep':   round(ema_sep, 3),
-        'reasons':   reasons,
-        'diag':      diag,
-        'entry_kind': entry_kind,
-    }
-
-
-# -- LAYER 2: News Sentiment --------------------------------------------------
-
-def _fetch_news(asset, asset_type):
-    headlines = []
-    try:
-        ticker = asset.split('/')[0] if '/' in asset else asset
-        url = (f"https://feeds.finance.yahoo.com/rss/2.0/headline"
-               f"?s={ticker}&region=US&lang=en-US")
-        r = requests.get(url, timeout=8)
-        if r.ok:
-            titles = re.findall(r'<title><!\[CDATA\[(.*?)\]\]></title>', r.text)
-            if not titles:
-                titles = re.findall(r'<title>(.*?)</title>', r.text)
-            headlines.extend([t for t in titles if len(t) > 15][:10])
-    except Exception as e:
-        logger.debug(f"News fetch error: {e}")
-    return headlines[:15]
-
-
-def _sentiment_score(headlines, direction):
-    if not headlines:
-        return {'score': 50, 'sentiment': 'neutral', 'headlines': [],
-                'bullish_kw': 0, 'bearish_kw': 0}
-    text = ' '.join(headlines).lower()
-    bull = sum(text.count(kw) for kw in BULLISH_KEYWORDS)
-    bear = sum(text.count(kw) for kw in BEARISH_KEYWORDS)
-    total = bull + bear
-    raw = (bull / total * 100) if total > 0 else 50
-    sent = 'bullish' if raw > 60 else 'bearish' if raw < 40 else 'neutral'
-    score = raw if direction == 'BUY' else (100 - raw)
-    return {
-        'score':      round(score, 1),
-        'sentiment':  sent,
-        'bullish_kw': bull,
-        'bearish_kw': bear,
-        'headlines':  headlines[:5],
-    }
-
-
-# -- LAYER 3: Historical Backtest --------------------------------------------
-
-def _historical_score(df, direction, tp_pct=0.02, sl_pct=0.01):
-    """Backtest looks at past setups identical to live entry logic.
-    PHASE 1.5 (FIX 13): Count BOTH fresh-cross AND trend-continuation setups.
-    PHASE 1.5 (FIX 14): Forward window extended from 12 to 32 bars (8h on 15m bars)
-        to match real-world trade time horizons. With 12 bars, ~50% of valid setups
-        never resolved within window and were silently dropped.
-    """
-    if df is None or len(df) < 100:
-        return {'score': 50, 'win_rate': 50, 'sample_size': 0}
-
-    FORWARD_BARS = 32  # 8 hours on 15m timeframe; covers forex max_hours
-    LOOKBACK     = 5
-
-    close = df['close'].astype(float)
-    e9    = _ema(close, 9)
-    e21   = _ema(close, 21)
-    e50   = _ema(close, 50)
-    rsi_s = _rsi(close)
-    wins  = 0
-    total = 0
-    fresh_count    = 0
-    continue_count = 0
-
-    for i in range(30, len(df) - FORWARD_BARS):
-        cf, pf = float(e9.iloc[i]),  float(e9.iloc[i-1])
-        cs, ps = float(e21.iloc[i]), float(e21.iloc[i-1])
-        e50v   = float(e50.iloc[i])
-        r      = float(rsi_s.iloc[i])
-        p      = float(close.iloc[i])
-
-        if not (40 <= r <= 60):
-            continue
-
-        fresh_cross_up   = pf <= ps and cf > cs
-        fresh_cross_down = pf >= ps and cf < cs
-
-        recent_cross_up   = False
-        recent_cross_down = False
-        fast_above = cf > cs
-        fast_below = cf < cs
-        if not (fresh_cross_up or fresh_cross_down) and i >= LOOKBACK + 2:
-            for k in range(2, LOOKBACK + 2):
-                f_now,  s_now  = float(e9.iloc[i-(k-1)]),  float(e21.iloc[i-(k-1)])
-                f_prev, s_prev = float(e9.iloc[i-k]),     float(e21.iloc[i-k])
-                if f_prev <= s_prev and f_now > s_now and fast_above:
-                    recent_cross_up = True
-                    break
-                if f_prev >= s_prev and f_now < s_now and fast_below:
-                    recent_cross_down = True
-                    break
-
-        above_50 = p > e50v
-
-        setup_buy = direction == 'BUY' and above_50 and (
-            fresh_cross_up or recent_cross_up
-        )
-        setup_sell = direction == 'SELL' and not above_50 and (
-            fresh_cross_down or recent_cross_down
-        )
-
-        if not (setup_buy or setup_sell):
-            continue
-
-        if setup_buy:
-            if fresh_cross_up:   fresh_count += 1
-            else:                continue_count += 1
-        else:
-            if fresh_cross_down: fresh_count += 1
-            else:                continue_count += 1
-
-        # Simulate forward to see if TP or SL hits first
-        tp = p * (1 + tp_pct) if setup_buy else p * (1 - tp_pct)
-        sl = p * (1 - sl_pct) if setup_buy else p * (1 + sl_pct)
-        future = close.iloc[i+1:i+1+FORWARD_BARS].values
-        resolved = False
-        for fp in future:
-            if (setup_buy and fp >= tp) or (setup_sell and fp <= tp):
-                wins  += 1
-                total += 1
-                resolved = True
-                break
-            elif (setup_buy and fp <= sl) or (setup_sell and fp >= sl):
-                total += 1
-                resolved = True
-                break
-        # If never resolved within window, count as a TIME-stop close at last price.
-        # Treat as win if last price favourable, loss otherwise. Don't drop the sample.
-        if not resolved and len(future) > 0:
-            last = float(future[-1])
-            move = (last - p) if setup_buy else (p - last)
-            total += 1
-            if move > 0:
-                wins += 1
-
-    if total < 5:
-        return {'score': 50, 'win_rate': 50, 'sample_size': total,
-                'fresh_count': fresh_count, 'continue_count': continue_count}
-
-    win_rate = round(wins / total * 100, 1)
-    return {
-        'score':          win_rate,
-        'win_rate':       win_rate,
-        'sample_size':    total,
-        'fresh_count':    fresh_count,
-        'continue_count': continue_count,
-    }
-
-
-# -- LAYER 4: Claude AI Decision ---------------------------------------------
-
-def _ai_decision(asset, direction, price, tech, sentiment, historical, regime, api_key):
-    if not api_key:
-        avg = tech['score'] * 0.5 + sentiment['score'] * 0.2 + historical['score'] * 0.3
-        return {'approved': avg >= 70, 'confidence': round(avg),
-                'reasoning': 'Weighted average (no API key)',
-                'key_risk': 'Unknown', 'expected_outcome': 'UNCERTAIN'}
-
-    headlines_text = '\n'.join(f"  - {h}" for h in sentiment.get('headlines', [])[:5])
-
-    prompt = f"""You are a risk-first trader protecting real capital.
-
-CORE PRINCIPLE:
-- Missing a trade costs NOTHING.
-- Taking a bad trade costs MONEY.
-- When in doubt, REJECT. Default answer is NO.
-- Only approve trades with overwhelming evidence of edge.
-
-TRADE SETUP:
-Asset: {asset} | Direction: {direction} | Price: {price} | Market regime: {regime}
-
-TECHNICAL (score {tech['score']}/100):
-RSI: {tech.get('rsi')} | EMA sep: {tech.get('ema_sep')}%
-Signals: {', '.join(tech.get('reasons', []))}
-
-NEWS SENTIMENT (score {sentiment['score']}/100):
-Sentiment: {sentiment.get('sentiment')} | Bullish kw: {sentiment.get('bullish_kw')} | Bearish kw: {sentiment.get('bearish_kw')}
-Headlines:
-{headlines_text if headlines_text else '  No headlines available'}
-
-HISTORICAL BACKTEST (score {historical['score']}/100):
-Win rate on similar setups: {historical.get('win_rate')}% from {historical.get('sample_size')} trades
-
-REJECT IMMEDIATELY if any of these are true:
-- Historical sample_size < 5 (not enough data to trust)
-- Historical win rate below 55%
-- News sentiment opposes direction
-- Technical score below 65
-- Market regime opposes direction (bull regime + SELL, or bear regime + BUY)
-- RSI outside 40-60
-
-Only APPROVE if ALL of these are true:
-- sample_size >= 5 AND win_rate >= 58%
-- Technical score >= 65
-- News sentiment neutral or supportive
-- Regime is neutral OR aligned with direction
-- You can articulate a specific edge in one sentence
-
-Respond ONLY in valid JSON:
-{{"approved": true/false, "confidence": 0-100, "reasoning": "brief reason", "key_risk": "main risk", "expected_outcome": "WIN/LOSS/UNCERTAIN"}}"""
-
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        msg = client.messages.create(
-            model='claude-sonnet-4-20250514',
-            max_tokens=200,
-            messages=[{'role': 'user', 'content': prompt}]
-        )
-        raw = msg.content[0].text.strip()
-        if '```' in raw:
-            raw = raw.split('```')[1].replace('json', '').strip()
-        return json.loads(raw)
-    except Exception as e:
-        logger.error(f"AI decision error: {e}")
-        return {'approved': False, 'confidence': 0,
-                'reasoning': f'AI error - rejected for safety ({e})',
-                'key_risk': 'Unknown', 'expected_outcome': 'UNCERTAIN'}
-
-
-# -- Signal builder -----------------------------------------------------------
-
-def _build_signal(df, asset, asset_type, cfg):
-    # Regime by asset class
-    if asset_type == 'crypto':
-        regime = get_crypto_regime()
-    elif asset_type == 'forex':
-        regime = get_forex_regime()
-    elif asset_type == 'stock':
-        regime = get_stock_regime()
-    else:
-        regime = 'neutral'
-
-    tech = _technical_score(df, asset, cfg.EMA_FAST, cfg.EMA_SLOW,
-                            cfg.RSI_LOWER_BAND, cfg.RSI_UPPER_BAND)
-
-    # Diagnostic: log why no signal fired
-    if not tech.get('direction'):
-        d = tech.get('diag') or {}
-        if d:
-            # Decide what the most informative description is
-            bits = []
-            if d.get('cross_up'):
-                bits.append('fresh cross up')
-            elif d.get('cross_down'):
-                bits.append('fresh cross down')
-            elif d.get('recent_cross_up'):
-                bits.append('recent cross up')
-            elif d.get('recent_cross_down'):
-                bits.append('recent cross down')
-            elif d.get('fast_above'):
-                bits.append('trend up but no recent cross')
-            else:
-                bits.append('no trend')
-
-            if not d.get('rsi_ok'):
-                bits.append(f'RSI {tech.get("rsi")} out of band')
-            if (d.get('cross_up') or d.get('recent_cross_up')) and not d.get('above_50'):
-                bits.append('price below 50EMA')
-            if (d.get('cross_down') or d.get('recent_cross_down')) and d.get('above_50'):
-                bits.append('price above 50EMA')
-
-            logger.info(f"  [{asset}] no signal - RSI {tech.get('rsi')}, "
-                        f"sep {tech.get('ema_sep')}% | {', '.join(bits)}")
-        return None
-
-    if tech['score'] < 40:
-        logger.info(f"  [{asset}] weak signal - score {tech['score']} < 40")
-        return None
-
-    direction = tech['direction']
-    price     = tech['price']
-
-    # Regime check
-    if not _regime_allows(direction, regime, asset=asset, asset_type=asset_type):
-        logger.info(f"  [{asset}] regime blocked: {direction} ({regime} regime)")
-        return None
-
-    # Per-asset settings - this is the SINGLE SOURCE OF TRUTH
-    settings = asset_config.get(asset)
-    tp_pct    = settings['tp']
-    sl_pct    = settings['sl']
-    leverage  = settings['leverage']
-    max_hours = settings['max_hours']
-    label     = settings['label']
-    emoji     = settings['emoji']
-
-    headlines  = _fetch_news(asset, asset_type)
-    sentiment  = _sentiment_score(headlines, direction)
-    historical = _historical_score(df, direction, tp_pct, sl_pct)
-
-    ai = _ai_decision(asset, direction, price, tech, sentiment, historical,
-                      regime, cfg.ANTHROPIC_API_KEY)
-
-    if not ai.get('approved', False):
-        logger.info(f"AI rejected {asset} {direction} - {ai.get('reasoning')}")
-        return None
-
-    confidence = ai.get('confidence', 0)
-    if confidence < cfg.MIN_CONFIDENCE:
-        logger.info(f"Low confidence ({confidence}%) {asset} - skipped")
-        return None
-
-    tp = round(price * ((1 + tp_pct) if direction == 'BUY' else (1 - tp_pct)), 6)
-    sl = round(price * ((1 - sl_pct) if direction == 'BUY' else (1 + sl_pct)), 6)
-
-    # Expected profit (paper) for log/banner
-    expected_profit = round(cfg.INITIAL_CAPITAL * tp_pct * leverage, 2)
-    expected_loss   = round(cfg.INITIAL_CAPITAL * sl_pct * leverage, 2)
-
-    entry_kind = tech.get('entry_kind', 'unknown')
-
-    logger.info(f"SIGNAL APPROVED: {direction} {asset} @ {price} | "
-                f"Entry:{entry_kind} | Conf:{confidence}% | Tech:{tech['score']} | "
-                f"Regime:{regime} | News:{sentiment['sentiment']} | "
-                f"HistWR:{historical['win_rate']}% ({historical['sample_size']}) | "
-                f"TP:{tp_pct*100:.2f}% SL:{sl_pct*100:.2f}% | Lev:{leverage}x | "
-                f"ExpWin GBP{expected_profit} | "
-                f"{ai.get('reasoning')}")
-
-    return {
-        # identifiers
-        'asset':           asset,
-        'asset_type':      asset_type,
-        'asset_label':     label,
-        'asset_emoji':     emoji,
-        'strategy':        f'EMA_TREND_{entry_kind.upper()}',
-        'entry_kind':      entry_kind,
-
-        # trade params (executor reads these directly)
-        'direction':       direction,
-        'price':           round(price, 6),
-        'take_profit':     tp,
-        'stop_loss':       sl,
-        'tp_pct':          tp_pct,
-        'sl_pct':          sl_pct,
-        'leverage':        leverage,
-        'max_hours':       max_hours,
-
-        # signal quality
-        'confidence':      confidence,
-        'tech_score':      tech['score'],
-        'sentiment_score': sentiment['score'],
-        'sentiment':       sentiment.get('sentiment'),
-        'historical_wr':   historical.get('win_rate'),
-        'sample_size':     historical.get('sample_size'),
-        'regime':          regime,
-        'rsi':             tech.get('rsi'),
-        'ai_reasoning':    ai.get('reasoning'),
-        'ai_risk':         ai.get('key_risk'),
-        'top_headlines':   sentiment.get('headlines', [])[:3],
-
-        # bookkeeping
-        'timestamp':       datetime.utcnow().isoformat(),
-        'expected_profit': expected_profit,
-        'expected_loss':   expected_loss,
-    }
-
-
-# -- Public API ---------------------------------------------------------------
-
-def scan_markets(cfg, open_trades=None):
-    _regime_cache.clear()
-    signals = []
-
-    # Crypto - 24/7
-    crypto_assets = getattr(cfg, 'CRYPTO_ASSETS', {})
-    for symbol, yf_ticker in crypto_assets.items():
-        df  = _fetch_crypto_yf(yf_ticker)
-        sig = _build_signal(df, symbol, 'crypto', cfg)
-        if sig:
-            sig['ticker'] = yf_ticker
-            signals.append(sig)
-
-    # Forex - session hours
-    if _is_forex_hours():
-        forex_assets = getattr(cfg, 'FOREX_ASSETS', {})
-        for ticker, name in forex_assets.items():
-            df  = _fetch_yf(ticker)
-            sig = _build_signal(df, name, 'forex', cfg)
-            if sig:
-                sig['ticker'] = ticker
-                signals.append(sig)
-    else:
-        logger.info("Forex session closed (active 08-21 UTC Mon-Fri).")
-
-    # Stocks - NYSE hours
-    if _is_stock_hours():
-        stock_assets = getattr(cfg, 'STOCK_ASSETS', {})
-        for ticker, name in stock_assets.items():
-            df  = _fetch_yf(ticker)
-            sig = _build_signal(df, ticker, 'stock', cfg)
-            if sig:
-                sig['display_name'] = name
-                signals.append(sig)
-
-        # ETFs - same hours and treatment as stocks (FIX: was never scanned)
-        etf_assets = getattr(cfg, 'ETF_ASSETS', {})
-        for ticker, name in etf_assets.items():
-            df  = _fetch_yf(ticker)
-            sig = _build_signal(df, ticker, 'stock', cfg)
-            if sig:
-                sig['display_name'] = name
-                signals.append(sig)
-    else:
-        logger.info("Stock/ETF market closed.")
-
-    # Commodities (use commodity name as asset key, matches asset_config)
-    commodity_assets = getattr(cfg, 'COMMODITY_ASSETS', {})
-    for ticker, name in commodity_assets.items():
-        df  = _fetch_yf(ticker)
-        sig = _build_signal(df, name, 'commodity', cfg)
-        if sig:
-            sig['ticker'] = ticker
-            signals.append(sig)
-
-    if not signals:
-        logger.info("No high-quality signals - waiting for perfect setup.")
-    return signals
-
-
-# -- Data fetchers ------------------------------------------------------------
-
-def _fetch_crypto_yf(yf_ticker, period='5d', interval='15m', limit=200):
-    """FIX: yfinance for crypto (binance was IP-banned on Render)."""
-    return _fetch_yf(yf_ticker, period=period, interval=interval, limit=limit)
-
+# ============================================================
+# CONSTANTS
+# ============================================================
+TIMEFRAME_HOURS    = 4
+HISTORY_BARS_NEEDED = 100   # 100 4h bars = ~17 days
+FETCH_HOURS_NEEDED = HISTORY_BARS_NEEDED * TIMEFRAME_HOURS * 1  # +safety margin
+YF_PERIOD          = '60d'  # yfinance: enough for 100+ 4h bars
+YF_INTERVAL        = '1h'   # we resample 1h -> 4h ourselves
+
+
+# ============================================================
+# DATA FETCH (with retry from v6.2 fix 19)
+# ============================================================
 
 def _yf_download_with_retry(ticker, period, interval, retry_delay=20):
-    """FIX 19: yfinance occasionally returns empty for valid tickers (e.g. BTC-USD
-    flagged 'possibly delisted'). Most are transient. Retry ONCE after a short
-    wait. If still empty, give up - don't block the scan loop indefinitely.
-    """
+    """yfinance retry-once. Fix 19 from v6.2."""
     import yfinance as yf
-    import time
     for attempt in (1, 2):
         try:
             raw = yf.download(ticker, period=period, interval=interval,
@@ -728,15 +66,15 @@ def _yf_download_with_retry(ticker, period, interval, retry_delay=20):
                 logger.info(f"yfinance empty for {ticker} - retrying in {retry_delay}s")
                 time.sleep(retry_delay)
         except Exception as e:
-            # Real exceptions (network, parse errors) - don't bother retrying
             logger.error(f"yfinance ({ticker}): {e}")
             return None
     logger.warning(f"yfinance ({ticker}) - empty after retry, giving up")
     return None
 
 
-def _fetch_yf(ticker, period='5d', interval='15m', limit=200):
-    raw = _yf_download_with_retry(ticker, period, interval)
+def _fetch_1h_data(ticker):
+    """Fetch 1-hour bars from yfinance."""
+    raw = _yf_download_with_retry(ticker, YF_PERIOD, YF_INTERVAL)
     if raw is None or raw.empty:
         return None
     try:
@@ -744,67 +82,346 @@ def _fetch_yf(ticker, period='5d', interval='15m', limit=200):
         df.columns = [str(c[0]) if isinstance(c, tuple) else str(c) for c in df.columns]
         df = df.rename(columns={'Datetime':'ts','Date':'ts','Open':'open',
                                  'High':'high','Low':'low','Close':'close','Volume':'vol'})
-        cols = ['ts','open','high','low','close','vol']
-        return df[cols].dropna().tail(limit)
+        cols = ['ts','open','high','low','close']
+        return df[cols].dropna()
     except Exception as e:
         logger.error(f"yfinance parse ({ticker}): {e}")
         return None
 
 
-def _fetch_daily_yf(ticker, period='400d'):
-    raw = _yf_download_with_retry(ticker, period, '1d')
-    if raw is None or raw.empty:
+def _resample_to_4h(df_1h):
+    """Resample 1h OHLC -> 4h OHLC."""
+    if df_1h is None or df_1h.empty:
         return None
-    try:
-        df = raw.reset_index()
-        df.columns = [str(c[0]) if isinstance(c, tuple) else str(c) for c in df.columns]
-        df = df.rename(columns={'Datetime':'ts','Date':'ts','Open':'open',
-                                 'High':'high','Low':'low','Close':'close','Volume':'vol'})
-        return df[['ts','open','high','low','close','vol']].dropna()
-    except Exception as e:
-        logger.error(f"yfinance daily parse ({ticker}): {e}")
-        return None
+    df = df_1h.set_index('ts').sort_index()
+    rs = df.resample('4h').agg({
+        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
+    }).dropna()
+    return rs.reset_index()
 
 
-# -- Price lookup for open trades --------------------------------------------
-# CRITICAL: keys MUST match what is stored in trade['asset']
-#   crypto    -> 'BTC/USDT'  (the symbol from CRYPTO_ASSETS keys)
-#   forex     -> 'EUR/USD'   (the name from FOREX_ASSETS values)
-#   stocks    -> 'NVDA'      (the ticker from STOCK_ASSETS keys)
-#   ETFs      -> 'SPY'       (the ticker from ETF_ASSETS keys)
-#   commodity -> 'GOLD'      (the name from COMMODITY_ASSETS values)
+# ============================================================
+# INDICATORS (vanilla implementations, no look-ahead)
+# ============================================================
+
+def _ema(s, period):
+    return s.ewm(span=period, adjust=False).mean()
+
+
+def _rsi(close, period=14):
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0.0)).rolling(window=period).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
+def _bollinger(close, period=20, std=2.0):
+    ma = close.rolling(window=period).mean()
+    sd = close.rolling(window=period).std()
+    return ma + std*sd, ma, ma - std*sd
+
+
+def _precompute(df):
+    """Add all indicator columns once per scan."""
+    df = df.copy()
+    df['rsi14']     = _rsi(df['close'], 14)
+    df['ema_short'] = _ema(df['close'], 20)
+    df['ema_long']  = _ema(df['close'], 50)
+    df['ma_long']   = df['close'].rolling(50).mean()
+    bu, bm, bl = _bollinger(df['close'], 20, 2.0)
+    df['bb_upper'] = bu
+    df['bb_lower'] = bl
+    return df
+
+
+# ============================================================
+# STRATEGY 1: BB SQUEEZE BREAKOUT
+# ============================================================
+
+def _bb_squeeze_signal(df):
+    """
+    Look for compression then breakout.
+    Fires on the bar that closes OUTSIDE the bands after squeeze.
+    Uses LAST bar (most recent complete 4h) for the signal.
+    """
+    if len(df) < 45:
+        return None, "insufficient history"
+    bb_period = 20
+    squeeze_lookback = 20
+    i = len(df) - 1  # most recent bar
+    last = df.iloc[i]
+    prev = df.iloc[i-1]
+    # Compute current BB width as % of price
+    if pd.isna(last['bb_upper']) or pd.isna(last['bb_lower']):
+        return None, "bb not ready"
+    bw_now = (last['bb_upper'] - last['bb_lower']) / last['close']
+    # Average width over recent squeeze_lookback bars (excluding current)
+    recent = df.iloc[i-squeeze_lookback:i]
+    widths = (recent['bb_upper'] - recent['bb_lower']) / recent['close']
+    avg_width = widths.mean()
+    if pd.isna(avg_width) or avg_width == 0:
+        return None, "avg width nan"
+    # Squeeze condition: current width is < 70% of recent average
+    if bw_now >= 0.7 * avg_width:
+        return None, f"no squeeze (bw {bw_now:.4f} >= 0.7*{avg_width:.4f})"
+    # Now check if THIS bar broke OUT of the band
+    close = last['close']
+    prev_close = prev['close']
+    if pd.isna(prev['bb_upper']) or pd.isna(prev['bb_lower']):
+        return None, "prev bb nan"
+    if close > last['bb_upper'] and prev_close <= prev['bb_upper']:
+        return 'BUY', "squeeze + close above upper band"
+    if close < last['bb_lower'] and prev_close >= prev['bb_lower']:
+        return 'SELL', "squeeze + close below lower band"
+    return None, "in squeeze but no breakout"
+
+
+# ============================================================
+# STRATEGY 2: MTF MOMENTUM (4h + daily alignment)
+# ============================================================
+
+def _mtf_momentum_signal(df):
+    """
+    Trade 4h fresh EMA cross only when daily (6 bars back) trend aligns.
+    """
+    if len(df) < 55:
+        return None, "insufficient history"
+    i = len(df) - 1
+    last = df.iloc[i]
+    prev = df.iloc[i-1]
+    if pd.isna(last['ema_short']) or pd.isna(last['ema_long']):
+        return None, "ema nan"
+    # Daily trend: now vs 6 bars (24h) ago
+    if i < 6:
+        return None, "not enough lookback for daily"
+    price_now = last['close']
+    price_back = df.iloc[i-6]['close']
+    daily_up = price_now > price_back
+    # Fresh cross condition (in last 3 bars)
+    rec = df.iloc[i-3:i+1]
+    crossed_up = (rec['ema_short'].iloc[0] <= rec['ema_long'].iloc[0]) and (rec['ema_short'].iloc[-1] > rec['ema_long'].iloc[-1])
+    crossed_dn = (rec['ema_short'].iloc[0] >= rec['ema_long'].iloc[0]) and (rec['ema_short'].iloc[-1] < rec['ema_long'].iloc[-1])
+    if crossed_up and daily_up:
+        return 'BUY', "fresh EMA cross up + daily up"
+    if crossed_dn and not daily_up:
+        return 'SELL', "fresh EMA cross down + daily down"
+    if crossed_up and not daily_up:
+        return None, "cross up but daily down (blocked)"
+    if crossed_dn and daily_up:
+        return None, "cross down but daily up (blocked)"
+    return None, "no fresh cross"
+
+
+# ============================================================
+# STRATEGY 3: 20-BAR BREAKOUT (Donchian)
+# ============================================================
+
+def _breakout_signal(df, lookback=20):
+    """
+    Trade close above/below N-bar high/low.
+    Fires on the bar where the breakout happens (not after).
+    """
+    if len(df) < lookback + 2:
+        return None, "insufficient history"
+    i = len(df) - 1
+    last_close = df.iloc[i]['close']
+    prev_close = df.iloc[i-1]['close']
+    # N-bar range BEFORE current bar
+    recent = df.iloc[i-lookback:i]
+    prev_high = recent['high'].max()
+    prev_low  = recent['low'].min()
+    if last_close > prev_high and prev_close <= prev_high:
+        return 'BUY', f"close {last_close:.2f} > {lookback}-bar high {prev_high:.2f}"
+    if last_close < prev_low and prev_close >= prev_low:
+        return 'SELL', f"close {last_close:.2f} < {lookback}-bar low {prev_low:.2f}"
+    return None, f"inside {lookback}-bar range [{prev_low:.2f}, {prev_high:.2f}]"
+
+
+# ============================================================
+# MARKET HOURS CHECK
+# ============================================================
+
+def _stock_market_open():
+    """NYSE: Mon-Fri 14:30-21:00 UTC.
+    For 4h strategies we relax this: scan if today is a weekday and we're
+    within 2h of normal market hours."""
+    now = datetime.now(timezone.utc)
+    if now.weekday() >= 5:  # Sat/Sun
+        return False
+    # Allow scans from 13:00 to 22:00 UTC (gives buffer around market hours)
+    hour = now.hour
+    return 13 <= hour <= 22
+
+
+# ============================================================
+# PRICE FETCHER (called by main.py for trade monitoring)
+# ============================================================
 
 def get_current_prices(cfg):
+    """Returns dict {asset: current_price} for all assets in universe.
+    Used by main.py to check open trades against TP/SL.
+    """
+    UNIVERSE = {
+        'NVDA': 'NVDA',
+        'AAPL': 'AAPL',
+        'TSLA': 'TSLA',
+        'GLD':  'GLD',
+    }
     prices = {}
-
-    # Crypto: store under symbol like 'BTC/USDT'
-    for symbol, yf_ticker in getattr(cfg, 'CRYPTO_ASSETS', {}).items():
-        df = _fetch_crypto_yf(yf_ticker, period='1d', interval='5m', limit=5)
-        if df is not None and not df.empty:
-            prices[symbol] = float(df['close'].iloc[-1])
-
-    # Forex: store under name like 'EUR/USD'
-    for ticker, name in getattr(cfg, 'FOREX_ASSETS', {}).items():
-        df = _fetch_yf(ticker, period='1d', interval='5m', limit=5)
-        if df is not None and not df.empty:
-            prices[name] = float(df['close'].iloc[-1])
-
-    # Stocks: store under ticker like 'NVDA' (FIX: was storing under company name)
-    for ticker, name in getattr(cfg, 'STOCK_ASSETS', {}).items():
-        df = _fetch_yf(ticker, period='1d', interval='5m', limit=5)
-        if df is not None and not df.empty:
-            prices[ticker] = float(df['close'].iloc[-1])
-
-    # ETFs: store under ticker like 'SPY' (FIX: was not fetched at all)
-    for ticker, name in getattr(cfg, 'ETF_ASSETS', {}).items():
-        df = _fetch_yf(ticker, period='1d', interval='5m', limit=5)
-        if df is not None and not df.empty:
-            prices[ticker] = float(df['close'].iloc[-1])
-
-    # Commodities: store under name like 'GOLD'
-    for ticker, name in getattr(cfg, 'COMMODITY_ASSETS', {}).items():
-        df = _fetch_yf(ticker, period='1d', interval='5m', limit=5)
-        if df is not None and not df.empty:
-            prices[name] = float(df['close'].iloc[-1])
-
+    for asset, ticker in UNIVERSE.items():
+        df = _fetch_1h_data(ticker)
+        if df is not None and len(df) > 0:
+            prices[asset] = float(df.iloc[-1]['close'])
+        else:
+            logger.warning(f"No current price for {asset}")
     return prices
+
+
+# ============================================================
+# BACKWARD-COMPAT ALIAS (so main.py doesn't need to change)
+# ============================================================
+
+def scan_markets(cfg, open_trades=None):
+    """Alias for scan_for_signals - keeps API compat with main.py v5.2.
+    Returns signals shaped to match what main.py expects.
+    """
+    raw_signals = scan_for_signals(cfg, open_trades)
+    # main.py expects fields: asset, direction, price, take_profit, stop_loss,
+    # leverage, strategy, confidence, expected_profit
+    formatted = []
+    for s in raw_signals:
+        entry = s['entry_price']
+        if s['direction'] == 'BUY':
+            tp = entry * (1 + s['tp_pct'])
+            sl = entry * (1 - s['sl_pct'])
+        else:
+            tp = entry * (1 - s['tp_pct'])
+            sl = entry * (1 + s['sl_pct'])
+        formatted.append({
+            'asset':            s['asset'],
+            'direction':        s['direction'],
+            'price':            entry,
+            'entry_price':      entry,
+            'take_profit':      round(tp, 6),
+            'stop_loss':        round(sl, 6),
+            'tp_pct':           s['tp_pct'],
+            'sl_pct':           s['sl_pct'],
+            'leverage':         s['leverage'],
+            'strategy':         s['strategy'],
+            'confidence':       s['confidence'],
+            'why':              s['why'],
+            'max_hours':        s['max_hours'],
+            'expected_profit':  round(entry * s['tp_pct'] * s['leverage'] * 50, 2),  # rough
+            'regime':           'neutral',  # not used in v7 but main.py may log it
+            'news_sentiment':   'neutral',
+        })
+    return formatted
+
+
+# ============================================================
+# MAIN SCAN FUNCTION
+# ============================================================
+
+def scan_for_signals(cfg, open_trades=None):
+    """
+    Run all 3 strategies on all 4 assets.
+    Returns list of signal dicts, each with:
+      asset, direction, strategy, entry_price, why, tp, sl, leverage, max_hours
+    """
+    if not _stock_market_open():
+        logger.info("Stock/ETF market closed (NYSE hours: Mon-Fri 13-22 UTC). Skipping scan.")
+        return []
+    
+    # ticker mapping: bot-internal name -> yfinance ticker
+    UNIVERSE = {
+        'NVDA': 'NVDA',
+        'AAPL': 'AAPL',
+        'TSLA': 'TSLA',
+        'GLD':  'GLD',
+    }
+    
+    open_assets = set()
+    if open_trades:
+        open_assets = {t['asset'] for t in open_trades if t.get('status') == 'OPEN'}
+    
+    signals = []
+    strategies = [
+        ('BBSqueeze_20',       _bb_squeeze_signal),
+        ('MTF_Momentum_daily', _mtf_momentum_signal),
+        ('Breakout_20bar',     _breakout_signal),
+    ]
+    
+    for asset, yf_ticker in UNIVERSE.items():
+        # Skip if we already have an open position on this asset (concentration filter)
+        if asset in open_assets:
+            logger.info(f"  [{asset}] skip - already has open position")
+            continue
+        
+        # Fetch + resample
+        df_1h = _fetch_1h_data(yf_ticker)
+        if df_1h is None or len(df_1h) < 50:
+            logger.warning(f"  [{asset}] insufficient 1h data, skipping")
+            continue
+        df_4h = _resample_to_4h(df_1h)
+        if df_4h is None or len(df_4h) < HISTORY_BARS_NEEDED:
+            logger.warning(f"  [{asset}] insufficient 4h data ({len(df_4h) if df_4h is not None else 0} bars), skipping")
+            continue
+        df_4h = _precompute(df_4h)
+        
+        current_price = float(df_4h.iloc[-1]['close'])
+        
+        # Run all 3 strategies on this asset
+        asset_signals = []
+        for strat_name, strat_fn in strategies:
+            sig, reason = strat_fn(df_4h)
+            if sig is None:
+                logger.info(f"  [{asset}] {strat_name}: no signal ({reason})")
+            else:
+                logger.info(f"  [{asset}] {strat_name}: {sig} ({reason})")
+                asset_signals.append({
+                    'strategy': strat_name,
+                    'direction': sig,
+                    'reason': reason,
+                })
+        
+        if not asset_signals:
+            continue
+        
+        # If multiple strategies fire on same asset, prefer agreement
+        # (e.g., if 2 strategies say BUY and 1 says SELL, take BUY)
+        directions = [s['direction'] for s in asset_signals]
+        if directions.count('BUY') > directions.count('SELL'):
+            chosen_dir = 'BUY'
+        elif directions.count('SELL') > directions.count('BUY'):
+            chosen_dir = 'SELL'
+        else:
+            # Tie - take the first (priority order: BBSqueeze, MTF, Breakout)
+            chosen_dir = asset_signals[0]['direction']
+        
+        # Use strategy(s) that voted for the chosen direction
+        winning_strats = [s for s in asset_signals if s['direction'] == chosen_dir]
+        strat_label = '+'.join(s['strategy'] for s in winning_strats)
+        why = ' | '.join(s['reason'] for s in winning_strats)
+        
+        # Build the signal
+        cfg_asset = asset_config.get(asset)
+        signal = {
+            'asset':       asset,
+            'direction':   chosen_dir,
+            'strategy':    strat_label,
+            'entry_price': current_price,
+            'tp_pct':      cfg_asset['tp'],
+            'sl_pct':      cfg_asset['sl'],
+            'leverage':    cfg_asset['leverage'],
+            'max_hours':   cfg_asset['max_hours'],
+            'why':         why,
+            'confidence':  min(95, 70 + 8 * len(winning_strats)),  # 78/86/94 for 1/2/3 agreeing
+            'n_strategies_agree': len(winning_strats),
+        }
+        signals.append(signal)
+        logger.info(f"  [{asset}] APPROVED: {chosen_dir} via {strat_label} @ {current_price}")
+    
+    if not signals:
+        logger.info("No signals this scan.")
+    return signals

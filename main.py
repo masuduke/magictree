@@ -1,29 +1,26 @@
 """
-main.py v5.2 - Phase B: Trailing-stop activation gate
-------------------------------------------------------
-Scheduler that runs every 15 min:
-  1. Check daily loss limit
-  2. Monitor open trades -> close at TP/SL/TIME
-  3. Apply trailing stop on open trades (with activation gate)
-  4. Scan markets for new signals
-  5. Filter out signals for assets that already have open positions
-  6. Open trade for highest-confidence approved signal
+main.py v6 - Option C: 3 strategies on 4h bars, 4 stocks/ETFs
+--------------------------------------------------------------
+This is a STRATEGY PIVOT from v5.2. After 27 paper trades with EMA crossover
+on 27 assets producing no edge (net +£101 driven entirely by a single GOLD
+outlier, expected real-money: -£210), backtest research identified Option C
+as the only configuration with positive expectancy on BOTH 15min and 4h
+timeframes:
+  - 3 strategies: BBSqueeze_20, MTF_Momentum_daily, Breakout_20bar
+  - 4 assets: NVDA, AAPL, TSLA, GLD
+  - 4-hour timeframe (was 15min)
+  - £5000 paper capital (was £500/£700)
+  - £200 daily loss limit (was £50)
 
-Fixes from v5.1:
-  - FIX 17: Trailing-stop activation gate. SL no longer moves until price has
-    crossed TRAIL_ACTIVATION_PCT fraction of TP target (default 50%). Once
-    activated, trail uses the asset's own sl_pct (not flat 0.3%).
-    Previously 0.3% trail scalped every trade on noise wicks - 4 of 6 closed
-    trades were trail-stopped within 0.5% of entry, R:R was 1:1 not designed 2:1.
+Strategy details documented in modules/market_scanner.py v7.
+Backtest results in research/results_4h.csv.
 
-Inherited from v5.1:
-  - FIX 16: Concentration filter - skip signals for assets already open
-
-Inherited from v5:
-  - signal['strategy'] safely fetched with .get()
-  - GBP currency symbol used correctly
-  - Trailing stop logic owned by main.py only
-  - Banner reflects asset count from all 5 classes including ETFs
+Inherited from v5.2:
+  - Persistent disk for trade state (Phase A)
+  - Trailing stop with activation gate (Phase B / Fix 17)
+  - Concentration filter (Fix 16)
+  - yfinance retry helper (Fix 19)
+  - WIN/LOSS labeling by PnL sign (Fix 18)
 """
 import time
 import logging
@@ -284,45 +281,41 @@ def run_daily_content():
 
 def main():
     total_assets = (
-        len(getattr(cfg, 'CRYPTO_ASSETS', {})) +
-        len(getattr(cfg, 'FOREX_ASSETS', {})) +
         len(getattr(cfg, 'STOCK_ASSETS', {})) +
-        len(getattr(cfg, 'ETF_ASSETS', {})) +
-        len(getattr(cfg, 'COMMODITY_ASSETS', {}))
+        len(getattr(cfg, 'ETF_ASSETS', {}))
     )
 
-    logger.info("Trading Bot v5.2 starting")
+    logger.info("Trading Bot v6.0 (Option C) starting")
     logger.info(f"  Mode:          {'PAPER' if cfg.PAPER_TRADE else 'LIVE'}")
     logger.info(f"  Capital:       GBP{cfg.INITIAL_CAPITAL}")
-    logger.info(f"  Assets:        {total_assets} across 5 classes")
-    logger.info(f"  Strategy:      EMA_TREND (single strategy)")
-    logger.info(f"  Min conf:      {cfg.MIN_CONFIDENCE}%")
+    logger.info(f"  Assets:        {total_assets} (NVDA, AAPL, TSLA, GLD)")
+    logger.info(f"  Timeframe:     {getattr(cfg, 'TIMEFRAME', '4h')}")
+    logger.info(f"  Strategies:    {', '.join(getattr(cfg, 'STRATEGY_NAMES', []))}")
     logger.info(f"  Daily limit:   GBP{cfg.MAX_DAILY_LOSS}")
     logger.info(f"  Max open:      {cfg.MAX_OPEN_TRADES}")
     logger.info(f"  Max per day:   {cfg.MAX_TRADES_PER_DAY}")
+    logger.info(f"  Scan interval: {cfg.SCAN_INTERVAL_MINUTES} min ({cfg.SCAN_INTERVAL_MINUTES/60:.1f}h)")
     logger.info(f"  Trailing stop: {'ON' if getattr(cfg, 'TRAILING_STOP_ENABLED', False) else 'OFF'}")
 
     notifier.send(
-        f"Trading Bot v5.2 Started\n\n"
+        f"Trading Bot v6.0 Started (Option C)\n\n"
         f"Mode: {'Paper' if cfg.PAPER_TRADE else 'LIVE'}\n"
         f"Capital: GBP{cfg.INITIAL_CAPITAL}\n"
-        f"Assets: {total_assets} total\n"
-        f"  {len(getattr(cfg,'CRYPTO_ASSETS',{}))} crypto (24/7)\n"
-        f"  {len(getattr(cfg,'FOREX_ASSETS',{}))} forex (30x leverage)\n"
-        f"  {len(getattr(cfg,'STOCK_ASSETS',{}))} stocks + {len(getattr(cfg,'ETF_ASSETS',{}))} ETFs\n"
-        f"  {len(getattr(cfg,'COMMODITY_ASSETS',{}))} commodity\n"
-        f"Strategy: EMA_TREND\n"
-        f"Min confidence: {cfg.MIN_CONFIDENCE}%\n"
+        f"Timeframe: {getattr(cfg, 'TIMEFRAME', '4h')}\n"
+        f"Assets: NVDA, AAPL, TSLA, GLD ({total_assets})\n"
+        f"Strategies: BBSqueeze + MTF Momentum + Breakout (3)\n"
         f"Daily loss limit: GBP{cfg.MAX_DAILY_LOSS}\n"
-        f"Max open trades: {cfg.MAX_OPEN_TRADES}",
+        f"Max open trades: {cfg.MAX_OPEN_TRADES}\n"
+        f"Scan every {cfg.SCAN_INTERVAL_MINUTES/60:.0f}h\n\n"
+        f"NOTE: Expect ~1 trade every 2-3 days (low frequency by design)",
         cfg
     )
 
     run_scan()
     schedule.every(cfg.SCAN_INTERVAL_MINUTES).minutes.do(run_scan)
-    schedule.every().day.at(f"{cfg.DAILY_POST_HOUR:02d}:00").do(run_daily_content)
+    schedule.every().day.at(f"{getattr(cfg, 'DAILY_POST_HOUR', 20):02d}:00").do(run_daily_content)
 
-    logger.info(f"Running - scan every {cfg.SCAN_INTERVAL_MINUTES}min")
+    logger.info(f"Running - scan every {cfg.SCAN_INTERVAL_MINUTES}min ({cfg.SCAN_INTERVAL_MINUTES/60:.1f}h)")
 
     while True:
         schedule.run_pending()
