@@ -30,6 +30,14 @@ MAX_OPEN_TRADES    = int(os.getenv('MAX_OPEN_TRADES', '3'))
 MAX_TRADES_PER_DAY = int(os.getenv('MAX_TRADES_PER_DAY', '10'))
 MAX_DAILY_LOSS     = float(os.getenv('MAX_DAILY_LOSS', '200'))  # 4% of £5000
 
+# Position sizing - used by etoro_executor.py for record-keeping (pos_sz field).
+# Note: actual PnL uses capital * leverage formula, not this risk%. Kept for
+# trade-log completeness (matches what a Capital.com order would record).
+RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '0.02'))  # 2% per trade
+
+# Daily content posting time (UTC hour)
+DAILY_POST_HOUR    = int(os.getenv('DAILY_POST_HOUR', '20'))
+
 # Scan timing - 4h cadence for 4h strategies
 SCAN_INTERVAL_MINUTES = int(os.getenv('SCAN_INTERVAL_MINUTES', '240'))
 
