@@ -1,22 +1,19 @@
 """
-main.py v6.1 - FIX 21: Intra-bar SL/TP detection for paper trades
-------------------------------------------------------------------
-FIX 21 (2026-05-11): On the first day of v6.0 deployment, NVDA and TSLA trades
-hit their stop-losses but closed at much worse prices (NVDA exited at $216.85
-vs SL $218.38; TSLA exited at $425.21 vs SL $437.86). Total damage: -£1634 in
-one afternoon vs designed -£750 max.
+main.py v6.2 - FIX 22: Strategy-Asset Whitelist
+------------------------------------------------
+FIX 22 (2026-05-12): After yesterday's £1634 blowout, audit revealed bot was
+firing 12 (strategy, asset) combinations but only 5 had backtest-validated
+edge. The TSLA Breakout signal that lost £1087 was one of the 7 unvalidated
+pairs. Scanner now uses an explicit VALIDATED_PAIRS whitelist.
 
-Root cause: 4h scan cadence + 'close at current price when past SL' logic
-in etoro_executor. Between scans, price moved past SL, so bot closed at worst
-observed price instead of at SL.
-
-Fix: main.py now fetches intra-bar 1h price history for each open trade and
-passes it to check_and_close(). The executor walks the bars to detect SL/TP
-hits at the SL/TP price (matching backtest + real-broker behaviour).
+FIX 21 (2026-05-11): Intra-bar SL/TP detection in etoro_executor.
+  When SL/TP is breached, closes AT the SL/TP price, not at the (worse)
+  current price. Models real broker SL fills.
 
 Inherited from v6.0:
   - 3 strategies (BBSqueeze_20, MTF_Momentum_daily, Breakout_20bar)
-  - 4 assets (NVDA, AAPL, TSLA, GLD)
+  - 4 assets (NVDA, AAPL, TSLA, GLD) — AAPL stays in universe but no
+    validated strategies, so it'll be skipped each scan
   - 4-hour timeframe
   - £5000 paper capital
   - £200 daily loss limit
@@ -300,7 +297,7 @@ def main():
         len(getattr(cfg, 'ETF_ASSETS', {}))
     )
 
-    logger.info("Trading Bot v6.1 (Option C + FIX 21) starting")
+    logger.info("Trading Bot v6.2 (Option C + FIX 21 + 22) starting")
     logger.info(f"  Mode:          {'PAPER' if cfg.PAPER_TRADE else 'LIVE'}")
     logger.info(f"  Capital:       GBP{cfg.INITIAL_CAPITAL}")
     logger.info(f"  Assets:        {total_assets} (NVDA, AAPL, TSLA, GLD)")
@@ -313,7 +310,7 @@ def main():
     logger.info(f"  Trailing stop: {'ON' if getattr(cfg, 'TRAILING_STOP_ENABLED', False) else 'OFF'}")
 
     notifier.send(
-        f"Trading Bot v6.1 Started (Option C + FIX 21)\n\n"
+        f"Trading Bot v6.2 Started (Option C + FIX 21 + 22)\n\n"
         f"Mode: {'Paper' if cfg.PAPER_TRADE else 'LIVE'}\n"
         f"Capital: GBP{cfg.INITIAL_CAPITAL}\n"
         f"Timeframe: {getattr(cfg, 'TIMEFRAME', '4h')}\n"

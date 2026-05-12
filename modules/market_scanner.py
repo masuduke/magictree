@@ -1,32 +1,24 @@
 """
-market_scanner.py v7 - Option C: 3 strategies on 4h bars, 4 stocks/ETFs
------------------------------------------------------------------------
-This is a COMPLETE REWRITE from v6.2. The previous scanner used EMA crossover
-+ AI gate on 27 assets. That strategy produced no edge after 27 paper trades.
+market_scanner.py v7.1 - FIX 22: Strategy-Asset Whitelist
+----------------------------------------------------------
+FIX 22 (2026-05-12): On the first day of v6.0 deployment, TSLA Breakout fired
+and hit SL for -£1087. Audit of the backtest research found TSLA Breakout had
+PF 1.08 (basically random noise) — it was NOT in the validated pairs list.
+The bot was firing all 3 strategies on all 4 assets (12 combinations), but
+only 5 of those have backtest-validated edge. The remaining 7 are noise.
 
-After rigorous backtest research (19 assets x 7 strategies x 2 timeframes),
-ONLY 3 strategies on 4 specific stocks showed positive expectancy on BOTH
-15min AND 4h timeframes:
-  - BBSqueeze_20:        TSLA, NVDA, GLD
-  - MTF_Momentum_daily:  NVDA
-  - Breakout_20bar:      NVDA, AAPL
+Fix: explicit VALIDATED_PAIRS dict. Only fire signals on:
+  NVDA: BBSqueeze, MTF_Momentum, Breakout (all 3 validated)
+  TSLA: BBSqueeze only
+  GLD:  BBSqueeze only
+  AAPL: nothing (Breakout_30bar was the validated combo, we don't use it)
 
-We trade ALL 3 strategies on ALL 4 assets (the strategies that don't work on
-a particular asset will produce few signals or losing ones; the AGGREGATE
-across this universe was profitable in backtest).
-
-KEY DESIGN DECISIONS:
-  - NO AI gate. Strategies were validated by backtest, not by AI scoring.
-  - NO RSI-band filter. Each strategy has its own internal logic.
-  - NO regime filter. Strategies are robust enough not to need it.
-  - 4h bars resampled from yfinance 1h data (4h not directly available).
-  - Live mode samples the most recent 200 bars × 1h = 50 4h-bars for signal.
-
-CONFIDENCE/AUDIT:
-  v6.2 lost £100 net across 27 trades. This was BECAUSE the strategy had no edge.
-  v7's strategies were tested on 730 days of real data and showed PF > 1.2 on the
-  specific (strategy, asset) pairs we trade. That's the only honest reason to
-  deploy a new strategy.
+Inherited from v7:
+  - FIX 21: Intra-bar SL/TP detection (in etoro_executor)
+  - FIX 19: yfinance retry-once helper
+  - Three 4h strategies: BBSqueeze_20, MTF_Momentum_daily, Breakout_20bar
+  - No AI gate (strategies are pre-validated by backtest, not by AI)
+  - 4-hour timeframe (1h yfinance data resampled to 4h)
 """
 import logging
 import time
@@ -406,10 +398,30 @@ def scan_for_signals(cfg, open_trades=None):
         ('Breakout_20bar',     _breakout_signal),
     ]
     
+    # FIX 22 (2026-05-12): Strategy-Asset Whitelist.
+    # After the TSLA Breakout SL hit on 2026-05-11 (-£1087), audit revealed the
+    # bot was firing 12 (strategy, asset) combinations, but only 5 were validated
+    # by the rigorous backtest research (PF>1.1 on both 15min AND 4h timeframes).
+    # The remaining 7 are noise - TSLA Breakout had PF 1.08 (basically random).
+    # 
+    # Now we ONLY fire signals on validated pairs:
+    VALIDATED_PAIRS = {
+        'NVDA': {'BBSqueeze_20', 'MTF_Momentum_daily', 'Breakout_20bar'},  # all 3 work on NVDA
+        'TSLA': {'BBSqueeze_20'},                                          # only BBSqueeze validated
+        'GLD':  {'BBSqueeze_20'},                                          # only BBSqueeze validated
+        'AAPL': set(),                                                      # nothing validated with current strategy set
+    }
+    
     for asset, yf_ticker in UNIVERSE.items():
         # Skip if we already have an open position on this asset (concentration filter)
         if asset in open_assets:
             logger.info(f"  [{asset}] skip - already has open position")
+            continue
+        
+        # FIX 22: Check whitelist BEFORE fetching data (saves API calls)
+        allowed_strategies = VALIDATED_PAIRS.get(asset, set())
+        if not allowed_strategies:
+            logger.info(f"  [{asset}] skip - no validated strategies for this asset")
             continue
         
         # Fetch + resample
@@ -425,9 +437,12 @@ def scan_for_signals(cfg, open_trades=None):
         
         current_price = float(df_4h.iloc[-1]['close'])
         
-        # Run all 3 strategies on this asset
+        # FIX 22: Only run strategies that are validated for this asset
         asset_signals = []
         for strat_name, strat_fn in strategies:
+            if strat_name not in allowed_strategies:
+                logger.info(f"  [{asset}] {strat_name}: SKIPPED (not validated for this asset)")
+                continue
             sig, reason = strat_fn(df_4h)
             if sig is None:
                 logger.info(f"  [{asset}] {strat_name}: no signal ({reason})")
