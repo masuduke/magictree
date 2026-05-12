@@ -1,23 +1,25 @@
 """
-etoro_executor.py v3.1 - Phase B: WIN/LOSS by PnL sign
--------------------------------------------------------
+etoro_executor.py v3.2 - FIX 21: Intra-bar SL/TP detection
+-----------------------------------------------------------
 Opens and closes paper trades, computes PnL with correct leverage.
+
+Fix 21 (2026-05-11): check_and_close() now accepts intra_bar_history dict.
+  When provided, walks 1h bars between entry and now to detect SL/TP hits AT
+  the SL/TP price (matching backtest + real-broker behaviour). Without this,
+  paper trades closed at whatever the scan-time price was - up to 3% past SL
+  on a 4h scan cadence. Caused two -£548 / -£1087 over-losses on 2026-05-11.
 
 Fixes from v3:
   - FIX 18: Result label (WIN/LOSS/BREAKEVEN) determined by sign of PnL, not
-    by which level was hit. Previously, a profitable trade closed by a trailed
-    SL was labelled LOSS - misleading. Now: pnl>0 -> WIN, pnl<0 -> LOSS,
-    pnl==0 -> BREAKEVEN. Close reason tracked separately as TP/SL/TRAIL/TIME.
+    by which level was hit.
   - Distinguishes TRAIL (trailed-SL hit after activation) from SL (initial
-    stop hit, trail never activated). Uses trail_activated flag set by main.py.
+    stop hit, trail never activated).
 
 Inherited from v3:
   - Reads leverage / tp_pct / sl_pct / max_hours / labels DIRECTLY from
     asset_config rather than trusting signal dict (defensive: even if scanner
     forgets a key, executor still uses correct values)
   - Removed duplicate trailing-stop logic (lives only in main.py now)
-  - Removed live eToro execution code path (was always failing per handover doc;
-    user is on Capital.com, not eToro). Kept module name for backward compat.
 """
 import logging
 from datetime import datetime, timedelta
@@ -103,9 +105,18 @@ def open_trade(signal, capital, cfg):
     return trade
 
 
-def check_and_close(open_trades, current_prices, cfg):
+def check_and_close(open_trades, current_prices, cfg, intra_bar_history=None):
     """Checks open trades against current prices.
     Closes at TP, SL, or time stop. Returns (updated_trades, newly_closed_trades).
+    
+    FIX 21 (2026-05-11): When intra_bar_history is provided, walks through bars
+    between entry and now to detect SL/TP hits AT the SL/TP price, not at the
+    current (possibly worse) price. This matches backtest behaviour and real
+    broker stop-loss orders.
+    
+    intra_bar_history: optional dict {asset: DataFrame with ts/open/high/low/close}
+                       containing bars since trade entry. If None or asset missing,
+                       falls back to current-price check (legacy behaviour).
     """
     updated = []
     closed  = []
@@ -116,8 +127,8 @@ def check_and_close(open_trades, current_prices, cfg):
             continue
 
         asset = t.get('asset')
-        price = current_prices.get(asset)
-        if price is None:
+        current_price = current_prices.get(asset)
+        if current_price is None:
             logger.warning(f"No current price for {asset} - cannot evaluate trade {t.get('id')}")
             updated.append(t)
             continue
@@ -127,16 +138,56 @@ def check_and_close(open_trades, current_prices, cfg):
         tp_target = t['take_profit']
         sl_target = t['stop_loss']
 
-        hit_tp = (
-            (direction == 'BUY'  and price >= tp_target) or
-            (direction == 'SELL' and price <= tp_target)
-        )
-        hit_sl = (
-            (direction == 'BUY'  and price <= sl_target) or
-            (direction == 'SELL' and price >= sl_target)
-        )
+        # FIX 21: Try intra-bar detection first if history is available
+        exit_price = None
+        exit_reason = None
+        history = intra_bar_history.get(asset) if intra_bar_history else None
+        if history is not None and len(history) > 0:
+            for _, bar in history.iterrows():
+                high = float(bar['high'])
+                low  = float(bar['low'])
+                if direction == 'BUY':
+                    # Check SL first: if both hit in same bar, assume SL hit first (conservative)
+                    if low <= sl_target:
+                        exit_price = sl_target
+                        exit_reason = 'TRAIL' if t.get('trail_activated') else 'SL'
+                        break
+                    if high >= tp_target:
+                        exit_price = tp_target
+                        exit_reason = 'TP'
+                        break
+                else:  # SELL
+                    if high >= sl_target:
+                        exit_price = sl_target
+                        exit_reason = 'TRAIL' if t.get('trail_activated') else 'SL'
+                        break
+                    if low <= tp_target:
+                        exit_price = tp_target
+                        exit_reason = 'TP'
+                        break
 
-        # Time stop
+        # If no intra-bar SL/TP hit, fall back to current-price check (catches
+        # cases where intra-bar data wasn't available, or for time-stop)
+        if exit_price is None:
+            hit_tp = (
+                (direction == 'BUY'  and current_price >= tp_target) or
+                (direction == 'SELL' and current_price <= tp_target)
+            )
+            hit_sl = (
+                (direction == 'BUY'  and current_price <= sl_target) or
+                (direction == 'SELL' and current_price >= sl_target)
+            )
+            if hit_tp:
+                # Close AT tp target, not at current (which is even better - rare)
+                exit_price = tp_target
+                exit_reason = 'TP'
+            elif hit_sl:
+                # Close AT sl target, not at the worse current price
+                # (this is the bug fix - matches a real broker SL fill)
+                exit_price = sl_target
+                exit_reason = 'TRAIL' if t.get('trail_activated') else 'SL'
+
+        # Time stop check (independent of price levels)
         max_hours  = t.get('max_hours', 24)
         try:
             entry_time = datetime.fromisoformat(t['entry_time'])
@@ -144,34 +195,28 @@ def check_and_close(open_trades, current_prices, cfg):
             entry_time = datetime.utcnow()
         hit_time = datetime.utcnow() >= entry_time + timedelta(hours=max_hours)
 
-        if not (hit_tp or hit_sl or hit_time):
+        if exit_price is None and not hit_time:
             updated.append(t)
             continue
 
-        # Calculate leveraged PnL
+        # If we got here via TIME (no TP/SL hit), use current price
+        if exit_price is None:
+            exit_price = current_price
+            exit_reason = 'TIME'
+
+        # Calculate leveraged PnL using the exit price determined above
         leverage      = t.get('leverage', 1)
         capital       = t.get('capital_before', cfg.INITIAL_CAPITAL)
         leveraged_pos = capital * leverage
 
         if direction == 'BUY':
-            raw_pnl = (price - entry) / entry * leveraged_pos
+            raw_pnl = (exit_price - entry) / entry * leveraged_pos
         else:
-            raw_pnl = (entry - price) / entry * leveraged_pos
+            raw_pnl = (entry - exit_price) / entry * leveraged_pos
 
         pnl = round(raw_pnl, 2)
 
-        # FIX 18: Determine close_reason from what was hit, but determine
-        # WIN/LOSS strictly from sign of PnL. Previously, a profitable trade
-        # closed by a trailed SL was labelled LOSS - confusing and wrong.
-        if hit_tp:
-            close_reason = 'TP'
-        elif hit_sl:
-            # Distinguish trail-stop from original-stop close
-            close_reason = 'TRAIL' if t.get('trail_activated') else 'SL'
-        else:
-            close_reason = 'TIME'
-            logger.info(f"Time stop: {asset} after {max_hours}h | PnL: GBP{pnl:.2f}")
-
+        # FIX 18: WIN/LOSS by PnL sign (not by close reason)
         if pnl > 0:
             result = 'WIN'
         elif pnl < 0:
@@ -179,20 +224,23 @@ def check_and_close(open_trades, current_prices, cfg):
         else:
             result = 'BREAKEVEN'
 
+        if exit_reason == 'TIME':
+            logger.info(f"Time stop: {asset} after {max_hours}h | PnL: GBP{pnl:.2f}")
+
         t.update({
             'status':       'CLOSED',
             'result':       result,
-            'exit_price':   round(price, 6),
+            'exit_price':   round(exit_price, 6),
             'exit_time':    datetime.utcnow().isoformat(),
             'pnl':          pnl,
             'pnl_pct':      round(pnl / capital * 100, 2) if capital else 0.0,
-            'close_reason': close_reason,
+            'close_reason': exit_reason,
         })
         closed.append(t)
 
         logger.info(
-            f"[{result}] {asset} {direction} | Entry:{entry} Exit:{price} | "
-            f"PnL:GBP{pnl:.2f} | Reason:{close_reason}"
+            f"[{result}] {asset} {direction} | Entry:{entry} Exit:{exit_price} | "
+            f"PnL:GBP{pnl:.2f} | Reason:{exit_reason}"
         )
         updated.append(t)
 

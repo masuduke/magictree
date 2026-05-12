@@ -279,6 +279,60 @@ def get_current_prices(cfg):
 
 
 # ============================================================
+# FIX 21: INTRA-BAR HISTORY FETCHER
+# ============================================================
+# Required because the bot scans every 4h. Between scans, price can move
+# through SL/TP without the bot seeing it. If we only check current price,
+# we close at the *current* price (could be far past SL) instead of at SL.
+# This caused NVDA -£548 (designed -£375) and TSLA -£1087 (designed -£375)
+# on 2026-05-11.
+#
+# This function fetches the 1h bars since trade entry, so check_and_close
+# can walk through each bar and detect intra-bar SL/TP hits at the actual
+# SL/TP price (modeling a real broker stop-loss order).
+
+import pandas as pd
+from datetime import datetime, timezone
+
+def get_intra_bar_history(asset, since_time_iso):
+    """Fetch 1h OHLC bars between since_time and now.
+    
+    Returns DataFrame with columns ts, open, high, low, close.
+    Returns None if fetch fails or no data after since_time.
+    
+    since_time_iso: ISO format string (e.g. '2026-05-11T14:44:00')
+    """
+    UNIVERSE = {
+        'NVDA': 'NVDA',
+        'AAPL': 'AAPL',
+        'TSLA': 'TSLA',
+        'GLD':  'GLD',
+    }
+    ticker = UNIVERSE.get(asset)
+    if not ticker:
+        return None
+    df = _fetch_1h_data(ticker)
+    if df is None or df.empty:
+        return None
+    try:
+        since_dt = pd.to_datetime(since_time_iso)
+        # Make both timezone-aware or both naive for comparison
+        df_ts = pd.to_datetime(df['ts'])
+        if df_ts.dt.tz is not None and since_dt.tzinfo is None:
+            since_dt = since_dt.tz_localize('UTC')
+        elif df_ts.dt.tz is None and since_dt.tzinfo is not None:
+            since_dt = since_dt.tz_localize(None)
+        # Filter to bars at or after entry time
+        filtered = df[df_ts >= since_dt].copy()
+        if filtered.empty:
+            return None
+        return filtered.reset_index(drop=True)
+    except Exception as e:
+        logger.warning(f"intra-bar history parse error for {asset}: {e}")
+        return None
+
+
+# ============================================================
 # BACKWARD-COMPAT ALIAS (so main.py doesn't need to change)
 # ============================================================
 

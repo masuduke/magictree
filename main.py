@@ -1,26 +1,26 @@
 """
-main.py v6 - Option C: 3 strategies on 4h bars, 4 stocks/ETFs
---------------------------------------------------------------
-This is a STRATEGY PIVOT from v5.2. After 27 paper trades with EMA crossover
-on 27 assets producing no edge (net +£101 driven entirely by a single GOLD
-outlier, expected real-money: -£210), backtest research identified Option C
-as the only configuration with positive expectancy on BOTH 15min and 4h
-timeframes:
-  - 3 strategies: BBSqueeze_20, MTF_Momentum_daily, Breakout_20bar
-  - 4 assets: NVDA, AAPL, TSLA, GLD
-  - 4-hour timeframe (was 15min)
-  - £5000 paper capital (was £500/£700)
-  - £200 daily loss limit (was £50)
+main.py v6.1 - FIX 21: Intra-bar SL/TP detection for paper trades
+------------------------------------------------------------------
+FIX 21 (2026-05-11): On the first day of v6.0 deployment, NVDA and TSLA trades
+hit their stop-losses but closed at much worse prices (NVDA exited at $216.85
+vs SL $218.38; TSLA exited at $425.21 vs SL $437.86). Total damage: -£1634 in
+one afternoon vs designed -£750 max.
 
-Strategy details documented in modules/market_scanner.py v7.
-Backtest results in research/results_4h.csv.
+Root cause: 4h scan cadence + 'close at current price when past SL' logic
+in etoro_executor. Between scans, price moved past SL, so bot closed at worst
+observed price instead of at SL.
 
-Inherited from v5.2:
-  - Persistent disk for trade state (Phase A)
-  - Trailing stop with activation gate (Phase B / Fix 17)
-  - Concentration filter (Fix 16)
-  - yfinance retry helper (Fix 19)
-  - WIN/LOSS labeling by PnL sign (Fix 18)
+Fix: main.py now fetches intra-bar 1h price history for each open trade and
+passes it to check_and_close(). The executor walks the bars to detect SL/TP
+hits at the SL/TP price (matching backtest + real-broker behaviour).
+
+Inherited from v6.0:
+  - 3 strategies (BBSqueeze_20, MTF_Momentum_daily, Breakout_20bar)
+  - 4 assets (NVDA, AAPL, TSLA, GLD)
+  - 4-hour timeframe
+  - £5000 paper capital
+  - £200 daily loss limit
+  - Persistent disk, trailing stop, concentration filter, retry helper
 """
 import time
 import logging
@@ -146,10 +146,25 @@ def run_scan():
     if open_trades:
         current_prices = market_scanner.get_current_prices(cfg)
 
+        # FIX 21: Fetch intra-bar history for each open trade so check_and_close
+        # can detect SL/TP hits at the actual SL/TP price, not at the current
+        # (possibly worse) price. Critical on 4h scan cadence where price can
+        # move 2-4% between scans.
+        intra_bar_history = {}
+        for t in open_trades:
+            if t.get('status') == 'OPEN':
+                asset = t.get('asset')
+                entry_time = t.get('entry_time')
+                if asset and entry_time:
+                    hist = market_scanner.get_intra_bar_history(asset, entry_time)
+                    if hist is not None:
+                        intra_bar_history[asset] = hist
+                        logger.info(f"  intra-bar history for {asset}: {len(hist)} bars since {entry_time}")
+
         # Trailing stop (if enabled, owned by main.py)
         _apply_trailing_stop(open_trades, current_prices)
 
-        updated, closed = trade_executor.check_and_close(open_trades, current_prices, cfg)
+        updated, closed = trade_executor.check_and_close(open_trades, current_prices, cfg, intra_bar_history)
 
         # Persist updates back to disk
         all_trades = trade_logger.load_trades(cfg)
@@ -285,7 +300,7 @@ def main():
         len(getattr(cfg, 'ETF_ASSETS', {}))
     )
 
-    logger.info("Trading Bot v6.0 (Option C) starting")
+    logger.info("Trading Bot v6.1 (Option C + FIX 21) starting")
     logger.info(f"  Mode:          {'PAPER' if cfg.PAPER_TRADE else 'LIVE'}")
     logger.info(f"  Capital:       GBP{cfg.INITIAL_CAPITAL}")
     logger.info(f"  Assets:        {total_assets} (NVDA, AAPL, TSLA, GLD)")
@@ -298,7 +313,7 @@ def main():
     logger.info(f"  Trailing stop: {'ON' if getattr(cfg, 'TRAILING_STOP_ENABLED', False) else 'OFF'}")
 
     notifier.send(
-        f"Trading Bot v6.0 Started (Option C)\n\n"
+        f"Trading Bot v6.1 Started (Option C + FIX 21)\n\n"
         f"Mode: {'Paper' if cfg.PAPER_TRADE else 'LIVE'}\n"
         f"Capital: GBP{cfg.INITIAL_CAPITAL}\n"
         f"Timeframe: {getattr(cfg, 'TIMEFRAME', '4h')}\n"
