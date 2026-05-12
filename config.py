@@ -72,6 +72,9 @@ DATA_DIR = os.getenv('DATA_DIR', '/data')
 DATA_FILE   = os.path.join(DATA_DIR, 'trades.json')
 EQUITY_FILE = os.path.join(DATA_DIR, 'equity.json')
 
+# Slide / generated content output dir (used by slide_creator for daily slides)
+SLIDES_DIR = os.getenv('SLIDES_DIR', os.path.join(DATA_DIR, 'slides'))
+
 # ============================================================
 # TELEGRAM
 # ============================================================
